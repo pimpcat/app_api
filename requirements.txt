@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+psycopg[binary]
+python-dotenv
+pandas
+openpyxl
+pyshp==2.3.1
