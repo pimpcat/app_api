@@ -1,0 +1,109 @@
+==================================================
+      DICCIONARIO DE DATOS: TABLA ATLAS.C_RNC     
+==================================================
+
+🔹 Campo: gid | Tipo: integer
+  -> Valores únicos (Muestra): [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+
+🔹 Campo: the_geom | Tipo: USER-DEFINED
+  -> [Contiene datos geométricos espaciales]
+
+🔹 Campo: fid | Tipo: numeric
+  -> Valores únicos (Muestra): [6984.0, 6985.0, 6986.0, 6987.0, 6988.0, 6989.0, 6990.0, 6991.0, 6992.0, 6993.0, 6994.0, 6995.0, 6996.0, 6997.0, 6998.0]
+
+🔹 Campo: id_red | Tipo: bigint
+  -> Valores únicos (Muestra): [11857, 11858, 11860, 11861, 11862, 11863, 11864, 11865, 11866, 11867, 11868, 11869, 11871, 11872, 11873]
+
+🔹 Campo: tipo_vial | Tipo: character varying
+  -> Valores únicos (Muestra): ['Ampliación', 'Andador', 'Avenida', 'Boulevard', 'Calle', 'Callejón', 'Calzada', 'Camino', 'Carretera', 'Cerrada', 'Circuito', 'Continuación', 'Corredor', 'Diagonal', 'Enlace']
+
+🔹 Campo: nombre | Tipo: character varying
+  -> Valores únicos (Muestra): ['Reynaldo Orozco', 'Islas Apipé', 'Ramal a Cacalotepec y Teocuitlapa', 'Condominio Topacio', 'Naranjito', 'Economía', 'Ajuchitlán - El Reparo - La Laja', 'David Pastrana', 'Pedro I', 'J. Isabel Jímenez', 'Safari', 'Segunda Cuauhtémoc', 'Velero', 'Río San Lucas', 'Victoria']
+
+🔹 Campo: codigo | Tipo: character varying
+  -> Valores únicos (Muestra): ['1', '113', '134', '166', '17', '195', '196', '198', '200', '260', '37', '51', '55', '7', '91']
+
+🔹 Campo: cond_pav | Tipo: character varying
+  -> Valores únicos (Muestra): ['Con pavimento', 'N/A', 'Sin pavimento']
+
+🔹 Campo: recubri | Tipo: character varying
+  -> Valores únicos (Muestra): ['Asfalto', 'Bloques', 'Concreto', 'Grava', 'N/A', 'Tierra']
+
+🔹 Campo: carriles | Tipo: character varying
+  -> Valores únicos (Muestra): ['1', '2', '3', '4', '5', '6', '7', '9', 'N/A']
+
+🔹 Campo: estatus | Tipo: character varying
+  -> Valores únicos (Muestra): ['Deshabilitado', 'Habilitado']
+
+🔹 Campo: condicion | Tipo: character varying
+  -> Valores únicos (Muestra): ['En construcción - cerrado', 'En operación']
+
+🔹 Campo: nivel | Tipo: bigint
+  -> Valores únicos (Muestra): [-1, 0, 1, 2]
+
+🔹 Campo: peaje | Tipo: character varying
+  -> Valores únicos (Muestra): ['No', 'Si']
+
+🔹 Campo: administra | Tipo: character varying
+  -> Valores únicos (Muestra): ['Estatal', 'Federal', 'Municipal', 'N/A', 'N/D', 'Otro', 'Particular']
+
+🔹 Campo: jurisdi | Tipo: character varying
+  -> Valores únicos (Muestra): ['Fed.', 'Gro.', 'Mex.', 'Mich.', 'Mor.', 'N/A', 'N/D', 'Oax.', 'Pue.']
+
+🔹 Campo: circula | Tipo: character varying
+  -> Valores únicos (Muestra): ['Cerrada en ambos sentidos', 'Dos sentidos', 'N/A', 'Un sentido']
+
+🔹 Campo: escala_vis | Tipo: bigint
+  -> Valores únicos (Muestra): [1, 2, 3, 4, 5]
+
+🔹 Campo: velocidad | Tipo: character varying
+  -> Valores únicos (Muestra): ['10', '100', '110', '20', '30', '40', '5', '50', '60', '70', '80', '90', 'N/A']
+
+🔹 Campo: union_ini | Tipo: bigint
+  -> Valores únicos (Muestra): [2745512, 2944473, 2176748, 1107319, 710020, 1896042, 2661518, 1104458, 2085484, 2517631, 1501085, 2125759, 9038, 1436607, 545232]
+
+🔹 Campo: union_fin | Tipo: bigint
+  -> Valores únicos (Muestra): [2745512, 2944473, 2176748, 1107319, 710020, 1896042, 2661518, 1104458, 2085484, 1501085, 2125759, 9038, 1436607, 545232, 616008]
+
+🔹 Campo: longitud | Tipo: numeric
+  -> Valores únicos (Muestra): [1.0117705181, 1.0118030483, 1.0137025427, 1.0186907355, 1.024694747, 1.0267935209, 1.0291520347, 1.0304606017, 1.0328083652, 1.0393220092, 1.0423691753, 1.0445453767, 1.0455811206, 1.0484371052, 1.0545434103]
+
+🔹 Campo: ancho | Tipo: numeric
+  -> Valores únicos (Muestra): [0.5, 0.8, 1.0, 1.1, 1.2, 1.25, 1.3, 1.35, 1.4, 1.5, 1.6, 1.7, 1.75, 1.8, 1.85]
+
+🔹 Campo: fecha_act | Tipo: character varying
+  -> Valores únicos (Muestra): ['2024-06-07 16:51:36', '2025-04-11 21:20:46', '2024-05-16 22:13:46', '2025-06-04 15:56:06', '2024-05-22 16:52:32', '2024-02-13 22:52:55', '2024-07-22 15:29:57', '2024-02-20 18:36:55', '2024-04-05 16:41:00', '2018-03-06 10:21:48', '2024-03-06 16:16:26', '2025-05-26 21:30:07', '2025-06-03 21:47:18', '2024-05-27 18:01:36', '2013-08-26 09:28:38']
+
+🔹 Campo: calirepr | Tipo: character varying
+  -> Valores únicos (Muestra): ['Aproximada', 'Definida']
+
+🔹 Campo: cvegeo | Tipo: character varying
+  -> Valores únicos (Muestra): ['12001', '12002', '12003', '12004', '12005', '12006', '12007', '12008', '12009', '12010', '12011', '12012', '12013', '12014', '12015']
+
+🔹 Campo: cve_ent | Tipo: character varying
+  -> Valores únicos (Muestra): ['12']
+
+🔹 Campo: cve_mun | Tipo: character varying
+  -> Valores únicos (Muestra): ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015']
+
+🔹 Campo: nomgeo | Tipo: character varying
+  -> Valores únicos (Muestra): ['Acapulco de Juárez', 'Acatepec', 'Ahuacuotzingo', 'Ajuchitlán del Progreso', 'Alcozauca de Guerrero', 'Alpoyeca', 'Apaxtla de Castrejón', 'Arcelia', 'Atenango del Río', 'Atlamajalcingo del Monte', 'Atlixtac', 'Atoyac de Álvarez', 'Ayutla de los Libres', 'Azoyú', 'Benito Juárez']
+
+🔹 Campo: layer | Tipo: character varying
+  -> Valores únicos (Muestra): ['CVE_MUN_001', 'CVE_MUN_002', 'CVE_MUN_003', 'CVE_MUN_004', 'CVE_MUN_005', 'CVE_MUN_006', 'CVE_MUN_007', 'CVE_MUN_008', 'CVE_MUN_009', 'CVE_MUN_010', 'CVE_MUN_011', 'CVE_MUN_012', 'CVE_MUN_013', 'CVE_MUN_014', 'CVE_MUN_015']
+
+🔹 Campo: path | Tipo: character varying
+  -> Valores únicos (Muestra): ['D:\\respaldo comité estatal 2025\\Documents\\2026\\Comite Estatal\\DEV_atlas\\SHAPES\\RNC_MPAL\\CVE_MUN_001.shp', 'D:\\respaldo comité estatal 2025\\Documents\\2026\\Comite Estatal\\DEV_atlas\\SHAPES\\RNC_MPAL\\CVE_MUN_002.shp', 'D:\\respaldo comité estatal 2025\\Documents\\2026\\Comite Estatal\\DEV_atlas\\SHAPES\\RNC_MPAL\\CVE_MUN_003.shp', 'D:\\respaldo comité estatal 2025\\Documents\\2026\\Comite Estatal\\DEV_atlas\\SHAPES\\RNC_MPAL\\CVE_MUN_004.shp', 'D:\\respaldo comité estatal 2025\\Documents\\2026\\Comite Estatal\\DEV_atlas\\SHAPES\\RNC_MPAL\\CVE_MUN_005.shp', 'D:\\respaldo comité estatal 2025\\Documents\\2026\\Comite Estatal\\DEV_atlas\\SHAPES\\RNC_MPAL\\CVE_MUN_006.shp', 'D:\\respaldo comité estatal 2025\\Documents\\2026\\Comite Estatal\\DEV_atlas\\SHAPES\\RNC_MPAL\\CVE_MUN_007.shp', 'D:\\respaldo comité estatal 2025\\Documents\\2026\\Comite Estatal\\DEV_atlas\\SHAPES\\RNC_MPAL\\CVE_MUN_008.shp', 'D:\\respaldo comité estatal 2025\\Documents\\2026\\Comite Estatal\\DEV_atlas\\SHAPES\\RNC_MPAL\\CVE_MUN_009.shp', 'D:\\respaldo comité estatal 2025\\Documents\\2026\\Comite Estatal\\DEV_atlas\\SHAPES\\RNC_MPAL\\CVE_MUN_010.shp', 'D:\\respaldo comité estatal 2025\\Documents\\2026\\Comite Estatal\\DEV_atlas\\SHAPES\\RNC_MPAL\\CVE_MUN_011.shp', 'D:\\respaldo comité estatal 2025\\Documents\\2026\\Comite Estatal\\DEV_atlas\\SHAPES\\RNC_MPAL\\CVE_MUN_012.shp', 'D:\\respaldo comité estatal 2025\\Documents\\2026\\Comite Estatal\\DEV_atlas\\SHAPES\\RNC_MPAL\\CVE_MUN_013.shp', 'D:\\respaldo comité estatal 2025\\Documents\\2026\\Comite Estatal\\DEV_atlas\\SHAPES\\RNC_MPAL\\CVE_MUN_014.shp', 'D:\\respaldo comité estatal 2025\\Documents\\2026\\Comite Estatal\\DEV_atlas\\SHAPES\\RNC_MPAL\\CVE_MUN_015.shp']
+
+🔹 Campo: source | Tipo: integer
+  -> Valores únicos (Muestra): [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+
+🔹 Campo: target | Tipo: integer
+  -> Valores únicos (Muestra): [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+
+🔹 Campo: cost | Tipo: double precision
+  -> Valores únicos (Muestra): [1.409486329611888e-05, 3.218574349343e-05, 7.248068154593702e-05, 8.09426418137646e-05, 9.011863911714547e-05, 0.00010821289789995823, 0.0003260556110829254, 0.0008549931876331361, 0.0008589380536784938, 0.0011325906489801963, 0.0013550578180486273, 0.0014220891593915129, 0.0018778125117160163, 0.002900474382085243, 0.0036875781825640077]
+
+🔹 Campo: reverse_cost | Tipo: double precision
+  -> Valores únicos (Muestra): [1.409486329611888e-05, 3.218574349343e-05, 7.248068154593702e-05, 8.09426418137646e-05, 9.011863911714547e-05, 0.00010821289789995823, 0.0003260556110829254, 0.0008549931876331361, 0.0008589380536784938, 0.0011325906489801963, 0.0013550578180486273, 0.0014220891593915129, 0.0018778125117160163, 0.002900474382085243, 0.0036875781825640077]
+

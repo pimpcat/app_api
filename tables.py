@@ -1,6 +1,9 @@
 """Nombres de tablas PostGIS en esquema atlas (renombres 2026)."""
 
-SCHEMA = "atlas"
+from config import get_settings
+
+# Esquema PostGIS dentro de la base (ATLAS_SCHEMA en .env). No confundir con DB_NAME.
+SCHEMA = get_settings()["schema"]
 
 # Marco municipal y contexto
 T_MUN = "c_mun"
@@ -12,6 +15,9 @@ T_DENUE = "c_denue"
 T_LOC_PUNTO = "c_loc_punto"
 T_COL_ASE = "c_col_ase"
 T_RNC = "c_rnc"
+T_RNC_ROUTING = "c_rnc_routing"
+T_RNC_LOC = "c_rnc_loc"
+T_RNC_VERTICES = "c_rnc_vertices_pgr"
 T_AGUA_SANEA = "c_agua_sanea"
 T_A = "c_a"
 T_AR = "c_ar"
@@ -20,6 +26,10 @@ T_L = "c_l"
 T_M = "c_m"
 T_ENT = "c_ent"
 T_RESIDUO = "c_residuo_solido"
+T_CLUES = "c_clues"
+T_HCORRIENTES = "hcorrientes"
+T_HCUERPOS = "hcuerpos"
+T_CURNIVEL = "curnivel"
 
 # Tablas de indicadores (sin cambio de nombre)
 T_TAB_MUNICIPAL = "tab_municipal"

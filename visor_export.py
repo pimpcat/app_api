@@ -52,11 +52,62 @@ def layer_uses_cvegeo_filter(conn, cfg: Dict[str, Any]) -> bool:
     return resolve_column(conn, SCHEMA, table, ("cvegeo", "CVEGEO")) is not None
 
 
-def layer_attribute_columns(conn, cfg: Dict[str, Any]) -> List[str]:
+def layer_geom_column(conn, cfg: Dict[str, Any]) -> str:
+    if cfg.get("geom_column"):
+        return str(cfg["geom_column"])
     if cfg.get("from_sql"):
+        return "the_geom"
+    table = cfg.get("table") or ""
+    if not table:
+        return "the_geom"
+    return (
+        resolve_column(conn, SCHEMA, table, ("the_geom", "geom", "wkb_geometry"))
+        or "the_geom"
+    )
+
+
+def table_attribute_columns(
+    conn,
+    table: str,
+    geom_col: str = "the_geom",
+) -> List[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT column_name, udt_name FROM information_schema.columns
+             WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position
+            """,
+            (SCHEMA, table),
+        )
+        skip_udt = {"geometry", "geography", "bytea"}
+        geom_key = (geom_col or "the_geom").lower()
+        cols: List[str] = []
+        for r in cur.fetchall():
+            name = (r["column_name"] or "").lower()
+            if name and name != geom_key and r["udt_name"] not in skip_udt:
+                cols.append(name)
+        return cols
+
+
+def layer_attribute_columns(
+    conn,
+    cfg: Dict[str, Any],
+    fmt: str = "kml",
+) -> List[str]:
+    geom_col = layer_geom_column(conn, cfg).lower()
+    export_key = "export_columns_kml" if fmt == "kml" else "export_columns_shp"
+    explicit = cfg.get(export_key) or (cfg.get("export_columns") if fmt == "kml" else None)
+
+    if fmt == "shp" and cfg.get("shp_all_table_columns") and cfg.get("gid_table"):
+        return table_attribute_columns(conn, str(cfg["gid_table"]), geom_col)
+
+    if cfg.get("from_sql"):
+        if explicit:
+            return list(explicit)
         return ["gid", "cve_mun", "tipo_vial"]
+
     table = cfg.get("table", "")
-    if cfg.get("export_columns"):
+    if explicit:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -66,48 +117,50 @@ def layer_attribute_columns(conn, cfg: Dict[str, Any]) -> List[str]:
                 (SCHEMA, table),
             )
             all_cols = {r["column_name"].lower() for r in cur.fetchall()}
-        return [c for c in cfg["export_columns"] if c.lower() in all_cols and c != "the_geom"]
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT column_name, udt_name FROM information_schema.columns
-             WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position
-            """,
-            (SCHEMA, table),
-        )
-        skip = {"geometry", "geography", "bytea"}
-        cols = []
-        for r in cur.fetchall():
-            name = (r["column_name"] or "").lower()
-            if name and name != "the_geom" and r["udt_name"] not in skip:
-                cols.append(name)
-        return cols[:200]
+        picked = [
+            c for c in explicit
+            if c.lower() in all_cols and c.lower() != geom_col
+        ]
+        if picked:
+            return picked
+
+    if table:
+        return table_attribute_columns(conn, table, geom_col)
+    return []
 
 
-def _geom_expr(from_sql: bool) -> str:
-    return "ST_AsGeoJSON(ST_Force2D(ST_Transform(the_geom, 4326)), 6)::text AS geom_json"
+def _geom_expr(geom_col: str) -> str:
+    q = quote_ident(geom_col)
+    return f"ST_AsGeoJSON(ST_Force2D(ST_Transform({q}, 4326)), 6)::text AS geom_json"
 
 
-def build_select_sql(cfg: Dict[str, Any], cols: Sequence[str], with_cvegeo: bool) -> str:
+def build_select_sql(
+    cfg: Dict[str, Any],
+    cols: Sequence[str],
+    with_cvegeo: bool,
+    geom_col: str,
+) -> str:
     attr = ", ".join(quote_ident(c) for c in cols)
-    geom = _geom_expr(bool(cfg.get("from_sql")))
+    geom = _geom_expr(geom_col)
     where = mun_where_sql("", with_cvegeo)
+    q_geom = quote_ident(geom_col)
     if cfg.get("from_sql"):
         return (
             f"SELECT {attr}, {geom} FROM {cfg['from_sql']}"
-            f" WHERE the_geom IS NOT NULL AND {where} LIMIT {MAX_FEATURES}"
+            f" WHERE {q_geom} IS NOT NULL AND {where} LIMIT {MAX_FEATURES}"
         )
     table = qualified(cfg["table"])
     return (
         f"SELECT {attr}, {geom} FROM {table}"
-        f" WHERE the_geom IS NOT NULL AND {where} LIMIT {MAX_FEATURES}"
+        f" WHERE {q_geom} IS NOT NULL AND {where} LIMIT {MAX_FEATURES}"
     )
 
 
-def build_count_sql(cfg: Dict[str, Any], with_cvegeo: bool) -> str:
+def build_count_sql(cfg: Dict[str, Any], with_cvegeo: bool, geom_col: str) -> str:
     where = mun_where_sql("", with_cvegeo)
     from_part = cfg["from_sql"] if cfg.get("from_sql") else qualified(cfg["table"])
-    return f"SELECT COUNT(*)::int AS n FROM {from_part} WHERE the_geom IS NOT NULL AND {where}"
+    q_geom = quote_ident(geom_col)
+    return f"SELECT COUNT(*)::int AS n FROM {from_part} WHERE {q_geom} IS NOT NULL AND {where}"
 
 
 def _coord_pairs(coords: Sequence) -> List[str]:
@@ -180,7 +233,19 @@ def geojson_to_kml_fragment(geom: Dict[str, Any]) -> str:
 
 
 def _pick_placemark_name(row: Dict[str, Any], cols: Sequence[str]) -> str:
-    for key in ("nom_loc", "nomvial", "nomvial1", "descripcio", "gid"):
+    for key in (
+        "nom_estab",
+        "nom_insti",
+        "nom_comer",
+        "nom_insadm",
+        "nom_tipo",
+        "tipo",
+        "nom_loc",
+        "nomvial",
+        "nomvial1",
+        "descripcio",
+        "gid",
+    ):
         if key in row and row[key] not in (None, ""):
             return str(row[key])
     for c in cols:
@@ -384,7 +449,8 @@ def build_shp_zip(
 
 
 def export_layer(conn, layer_id: str, fmt: str, cve: str, nom_mun: str):
-    cfg = layer_config(layer_id)
+    layer_key = (layer_id or "").strip().lower()
+    cfg = layer_config(layer_key)
     if not cfg:
         raise ValueError("UNKNOWN_LAYER")
     cve = norm_cve_mun(cve)
@@ -396,13 +462,14 @@ def export_layer(conn, layer_id: str, fmt: str, cve: str, nom_mun: str):
     with conn.cursor() as cur:
         cur.execute("SET statement_timeout TO 120000")
 
-    cols = layer_attribute_columns(conn, cfg)
+    geom_col = layer_geom_column(conn, cfg)
+    cols = layer_attribute_columns(conn, cfg, fmt)
     if not cols:
         raise ValueError("NO_COLUMNS")
 
     with_cvegeo = layer_uses_cvegeo_filter(conn, cfg)
-    count_sql = build_count_sql(cfg, with_cvegeo)
-    sql = build_select_sql(cfg, cols, with_cvegeo)
+    count_sql = build_count_sql(cfg, with_cvegeo, geom_col)
+    sql = build_select_sql(cfg, cols, with_cvegeo, geom_col)
 
     with conn.cursor() as cur:
         cur.execute(count_sql, {"cve": cve})
@@ -412,12 +479,12 @@ def export_layer(conn, layer_id: str, fmt: str, cve: str, nom_mun: str):
         cur.execute(sql, {"cve": cve})
         rows = cur.fetchall()
 
-    slug_layer = re.sub(r"[^a-z0-9]+", "_", layer_id.lower())
+    slug_layer = re.sub(r"[^a-z0-9]+", "_", layer_key)
     slug_mun = re.sub(r"[^a-z0-9]+", "_", (nom_mun or f"mun_{cve}").lower())
     base = f"atlas_{slug_layer}_{cve}_{slug_mun}"
 
     if fmt == "kml":
-        data = stream_kml(rows, cfg.get("label", layer_id), cols, cve, nom_mun or None)
+        data = stream_kml(rows, cfg.get("label", layer_key), cols, cve, nom_mun or None)
         if b"<Placemark>" not in data:
             raise ValueError("NO_GEOMETRIES")
         return data, f"{base}.kml", "application/vnd.google-earth.kml+xml; charset=UTF-8"
@@ -427,6 +494,6 @@ def export_layer(conn, layer_id: str, fmt: str, cve: str, nom_mun: str):
     except ValueError:
         raise
     except Exception as exc:
-        logger.exception("SHP export failed for layer=%s cve=%s", layer_id, cve)
+        logger.exception("SHP export failed for layer=%s cve=%s", layer_key, cve)
         raise ValueError(f"SHP_WRITE_FAILED:{exc}") from exc
     return data, f"{base}_wgs84.zip", "application/zip"

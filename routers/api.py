@@ -1,20 +1,24 @@
 """Endpoints REST del Atlas (equivalente a api/*.php)."""
 
+import json
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import JSONResponse
 
 from column_resolver import resolve_column
+from config import get_settings
 from database import get_db
 from explorador import build_explorador_all_response, build_explorador_response
 from ranking import build_top_bottom_response
 from tab_municipal import fetch_nacional_estatal_municipio, load_tab_municipal_rows
-from tables import SCHEMA, T_CONTEXTO, T_MUN, T_TAB_MUNICIPAL, T_TAB_NACIONAL, qualified
-from utils import is_mun_cve3, norm_cve_mun, quote_ident, row_numeric
+from tables import SCHEMA, T_COL_ASE, T_CONTEXTO, T_L, T_MUN, T_TAB_MUNICIPAL, T_TAB_NACIONAL, T_CLUES, qualified
+from utils import is_mun_cve3, mun_where_sql, norm_cve_mun, quote_ident, row_numeric
 from vistas_educacion import build_analfabetismo_response, build_escolaridad_response
 from vistas_tab_municipal import (
     build_caracteristicas_economicas_response,
@@ -28,10 +32,43 @@ from vistas_tab_municipal import (
 from vistas_nacional import ent_key_to_int
 from visor_export import export_error_message, export_layer
 from visor_layers import layer_catalog
+from visor_tabular import (
+    build_tabular_xlsx,
+    fetch_tabular_data,
+    list_tabular_layers,
+    tabular_error_message,
+)
+from visor_buffer import buffer_geometry_geojson, fetch_feature_geometry_geojson, fetch_feature_outline_geojson
+from geocoder import buscar_lugares
+from spatial_analysis import (
+    ejecutar_analisis_espacial,
+    listar_capas_disponibles,
+    listar_columnas_numericas,
+)
 
 router = APIRouter()
 
 INEGI_WMTS_LAYER = "MapaBaseTopograficov61_sinsombreado"
+
+
+def _martin_catalog_layer_ids(catalog: Any) -> List[str]:
+    """IDs de capas en catálogo Martin (dict legacy o lista con campo id)."""
+    ids: List[str] = []
+    if isinstance(catalog, dict):
+        tiles = catalog.get("tiles")
+        if isinstance(tiles, dict):
+            ids.extend(str(k) for k in tiles.keys())
+        else:
+            ids.extend(str(k) for k in catalog.keys() if k not in ("tiles", "sprites", "fonts"))
+    elif isinstance(catalog, list):
+        for item in catalog:
+            if isinstance(item, dict) and item.get("id"):
+                ids.append(str(item["id"]))
+    return ids
+
+
+def _martin_catalog_has_layer(catalog: Any, layer_id: str) -> bool:
+    return layer_id in _martin_catalog_layer_ids(catalog)
 INEGI_WMTS_UPSTREAM = (
     "https://gaiamapas.inegi.org.mx/mdmCache/service/wmts"
     "?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0"
@@ -67,7 +104,94 @@ def _sel_params(cve_mun: Optional[str], nom_mun: Optional[str]):
 @router.get("/api/health")
 @router.get("/api/health.php")
 def health():
-    return {"ok": True, "service": "atlasgro-api", "time": datetime.now(timezone.utc).isoformat()}
+    settings = get_settings()
+    payload: Dict[str, Any] = {
+        "ok": True,
+        "service": "atlasgro-api",
+        "time": datetime.now(timezone.utc).isoformat(),
+        "database": settings.get("database_name") or None,
+        "schema": settings.get("schema") or None,
+    }
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT current_database() AS db, current_schema() AS sch")
+                row = cur.fetchone() or {}
+                payload["database_connected"] = row.get("db")
+                payload["search_path_schema"] = row.get("sch")
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*)::int AS total,
+                           COUNT(the_geom)::int AS con_geom,
+                           COUNT(DISTINCT cve_mun)::int AS muns
+                      FROM {qualified(T_CLUES)}
+                    """
+                )
+                clues = cur.fetchone() or {}
+                cur.execute(
+                    """
+                    SELECT type, srid
+                      FROM geometry_columns
+                     WHERE f_table_schema = %s AND f_table_name = %s
+                    """,
+                    (SCHEMA, T_CLUES),
+                )
+                geom = cur.fetchone() or {}
+                payload["c_clues"] = {
+                    "table": f"{SCHEMA}.{T_CLUES}",
+                    "rows": clues.get("total"),
+                    "with_geom": clues.get("con_geom"),
+                    "municipios": clues.get("muns"),
+                    "geom_type": geom.get("type"),
+                    "srid": geom.get("srid"),
+                }
+                cur.execute(
+                    f"""
+                    SELECT TRIM(cve_mun::text) AS cve_mun, COUNT(*)::int AS n
+                      FROM {qualified(T_CLUES)}
+                     WHERE cve_mun IS NOT NULL AND TRIM(cve_mun::text) <> ''
+                     GROUP BY 1
+                     ORDER BY n DESC
+                     LIMIT 5
+                    """
+                )
+                payload["c_clues"]["sample_cve_mun"] = cur.fetchall()
+        try:
+            req = urllib.request.Request(
+                "http://martin:3000/catalog",
+                headers={"User-Agent": "AtlasGro/2.0 (health)"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                catalog = json.loads(resp.read().decode("utf-8"))
+            layer_ids = _martin_catalog_layer_ids(catalog)
+            payload["martin_tiles"] = sorted(layer_ids)
+            payload["martin_has_c_clues"] = _martin_catalog_has_layer(catalog, T_CLUES)
+            try:
+                tj_req = urllib.request.Request(
+                    f"http://martin:3000/{T_CLUES}",
+                    headers={"User-Agent": "AtlasGro/2.0 (health)"},
+                )
+                with urllib.request.urlopen(tj_req, timeout=5) as tj_resp:
+                    tilejson = json.loads(tj_resp.read().decode("utf-8"))
+                layers = tilejson.get("vector_layers") or []
+                for layer in layers:
+                    if layer.get("id") == T_CLUES:
+                        payload["c_clues_mvt_fields"] = (
+                            layer.get("fields")
+                            or layer.get("properties")
+                            or layer.get("attributes")
+                        )
+                        break
+                if payload.get("c_clues_mvt_fields") is None and layers:
+                    payload["c_clues_mvt_layer_sample"] = layers[0]
+            except Exception as tj_exc:
+                payload["c_clues_tilejson_error"] = str(tj_exc).split("\n", 1)[0]
+        except Exception as martin_exc:
+            payload["martin_catalog_error"] = str(martin_exc).split("\n", 1)[0]
+    except Exception as exc:
+        payload["ok"] = False
+        payload["database_error"] = str(exc).split("\n", 1)[0]
+    return payload
 
 
 @router.get("/inegi/wmts/tile")
@@ -112,6 +236,34 @@ def municipios():
     return {"ok": True, "count": len(rows), "rows": rows}
 
 
+# --- Buscador geográfico offline (PostGIS multitabla) ---
+
+@router.get("/buscar")
+@router.get("/api/buscar")
+def buscar(
+    q: str = Query(..., min_length=2, max_length=120, description="Texto a buscar"),
+    cve_mun: str = Query(
+        "",
+        description="Clave municipal (3 dígitos). Limita resultados al municipio seleccionado.",
+    ),
+):
+    """
+    Geocoder local: localidades (c_loc_punto) y colonias (c_col_ase) dentro del municipio.
+    Sin ``cve_mun`` válido devuelve municipios, localidades y colonias a nivel estatal.
+    """
+    term = q.strip()
+    cve = norm_cve_mun(cve_mun)
+    scoped = bool(cve and is_mun_cve3(cve))
+    rows = buscar_lugares(term, cve_mun=cve if scoped else None)
+    return {
+        "ok": True,
+        "query": term,
+        "cve_mun": cve if scoped else None,
+        "count": len(rows),
+        "rows": rows,
+    }
+
+
 @router.get("/municipio/extent")
 @router.get("/api/municipio/extent")
 @router.get("/api/municipio_extent.php")
@@ -141,6 +293,131 @@ def municipio_extent(cve_mun: str = Query(...)):
     if west >= east or south >= north:
         raise HTTPException(status_code=500, detail="INVALID_BOUNDS")
     return {"ok": True, "cve_mun": cve, "bbox": {"west": west, "south": south, "east": east, "north": north}}
+
+
+@router.get("/visor/colonias-labels")
+@router.get("/api/visor/colonias-labels")
+def colonias_labels(cve_mun: str = Query(...)):
+    """Un punto de etiqueta por colonia (ST_PointOnSurface), sin duplicados por tesela MVT."""
+    cve = norm_cve_mun(cve_mun)
+    if not is_mun_cve3(cve):
+        raise HTTPException(status_code=400, detail="INVALID_CVE")
+    with get_db() as conn:
+        nom_col = resolve_column(conn, SCHEMA, T_COL_ASE, ("nom_asen", "NOM_ASEN"))
+        gid_col = resolve_column(conn, SCHEMA, T_COL_ASE, ("gid", "GID", "ogc_fid", "OGC_FID"))
+        if not nom_col:
+            raise HTTPException(status_code=500, detail="NOM_COLUMN_NOT_FOUND")
+        gid_sel = f"TRIM({quote_ident(gid_col)}::text)" if gid_col else "NULL::text"
+        where = mun_where_sql("", with_cvegeo=True)
+        sql = f"""
+          SELECT {gid_sel} AS gid,
+                 TRIM({quote_ident(nom_col)}::text) AS nom_asen,
+                 ST_X(ST_Transform(ST_PointOnSurface(the_geom), 4326)) AS lon,
+                 ST_Y(ST_Transform(ST_PointOnSurface(the_geom), 4326)) AS lat
+            FROM {qualified(T_COL_ASE)}
+           WHERE the_geom IS NOT NULL
+             AND TRIM(COALESCE({quote_ident(nom_col)}::text, '')) <> ''
+             AND {where}
+        """
+        with conn.cursor() as cur:
+            cur.execute(sql, {"cve": cve})
+            rows = cur.fetchall()
+    features = []
+    for row in rows:
+        lon, lat = row.get("lon"), row.get("lat")
+        nom = (row.get("nom_asen") or "").strip()
+        if lon is None or lat is None or not nom:
+            continue
+        props = {"nom_asen": nom, "NOM_ASEN": nom}
+        gid = row.get("gid")
+        if gid is not None and str(gid).strip():
+            props["gid"] = str(gid).strip()
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [float(lon), float(lat)]},
+                "properties": props,
+            }
+        )
+    return {
+        "ok": True,
+        "cve_mun": cve,
+        "count": len(features),
+        "featureCollection": {"type": "FeatureCollection", "features": features},
+    }
+
+
+@router.get("/visor/locs-atlas-labels")
+@router.get("/api/visor/locs-atlas-labels")
+def locs_atlas_labels(cve_mun: str = Query(...)):
+    """Un punto de etiqueta por localidad con amanzanamiento (c_l), sin duplicados por tesela MVT."""
+    cve = norm_cve_mun(cve_mun)
+    if not is_mun_cve3(cve):
+        raise HTTPException(status_code=400, detail="INVALID_CVE")
+    with get_db() as conn:
+        nom_col = resolve_column(conn, SCHEMA, T_L, ("nomgeo", "NOMGEO"))
+        cvegeo_col = resolve_column(conn, SCHEMA, T_L, ("cvegeo", "CVEGEO"))
+        gid_col = resolve_column(conn, SCHEMA, T_L, ("gid", "GID", "ogc_fid", "OGC_FID"))
+        if not nom_col and not cvegeo_col:
+            raise HTTPException(status_code=500, detail="LABEL_COLUMNS_NOT_FOUND")
+        gid_sel = f"TRIM({quote_ident(gid_col)}::text)" if gid_col else "NULL::text"
+        nom_sel = f"TRIM({quote_ident(nom_col)}::text)" if nom_col else "NULL::text"
+        cvegeo_sel = f"TRIM({quote_ident(cvegeo_col)}::text)" if cvegeo_col else "NULL::text"
+        nom_pred = (
+            f"TRIM(COALESCE({quote_ident(nom_col)}::text, '')) <> ''"
+            if nom_col
+            else "FALSE"
+        )
+        cvegeo_pred = (
+            f"TRIM(COALESCE({quote_ident(cvegeo_col)}::text, '')) <> ''"
+            if cvegeo_col
+            else "FALSE"
+        )
+        where = mun_where_sql("", with_cvegeo=True)
+        sql = f"""
+          SELECT {gid_sel} AS gid,
+                 {nom_sel} AS nomgeo,
+                 {cvegeo_sel} AS cvegeo,
+                 ST_X(ST_Transform(ST_PointOnSurface(the_geom), 4326)) AS lon,
+                 ST_Y(ST_Transform(ST_PointOnSurface(the_geom), 4326)) AS lat
+            FROM {qualified(T_L)}
+           WHERE the_geom IS NOT NULL
+             AND ({nom_pred} OR {cvegeo_pred})
+             AND {where}
+        """
+        with conn.cursor() as cur:
+            cur.execute(sql, {"cve": cve})
+            rows = cur.fetchall()
+    features = []
+    for row in rows:
+        lon, lat = row.get("lon"), row.get("lat")
+        nom = (row.get("nomgeo") or "").strip()
+        cvegeo = (row.get("cvegeo") or "").strip()
+        if lon is None or lat is None or (not nom and not cvegeo):
+            continue
+        props = {}
+        if nom:
+            props["nomgeo"] = nom
+            props["NOMGEO"] = nom
+        if cvegeo:
+            props["cvegeo"] = cvegeo
+            props["CVEGEO"] = cvegeo
+        gid = row.get("gid")
+        if gid is not None and str(gid).strip():
+            props["gid"] = str(gid).strip()
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [float(lon), float(lat)]},
+                "properties": props,
+            }
+        )
+    return {
+        "ok": True,
+        "cve_mun": cve,
+        "count": len(features),
+        "featureCollection": {"type": "FeatureCollection", "features": features},
+    }
 
 
 _geo_contexto_bulk_cache: Optional[Dict[str, Dict[str, Any]]] = None
@@ -860,6 +1137,203 @@ def inv_bbox(
     }
 
 
+# --- Análisis espacial dinámico (polígono + campos INV) ---
+
+
+class AnalisisDinamicoBody(BaseModel):
+    """Cuerpo POST /api/analisis/dinamico: polígono GeoJSON y columnas a agregar."""
+
+    tabla: str = Field(..., description="Identificador de capa (ej. c_inv)")
+    campos_elegidos: List[str] = Field(..., min_length=1)
+    geojson: Dict[str, Any] = Field(..., description="Feature, Geometry o FeatureCollection")
+    cve_mun: Optional[str] = Field(None, description="Filtro municipal opcional (3 dígitos)")
+
+
+@router.get("/analisis/capas")
+@router.get("/api/analisis/capas")
+def analisis_listar_capas():
+    """Catálogo de capas disponibles para análisis espacial (paso 1 del flujo UI)."""
+    return {"ok": True, "capas": listar_capas_disponibles()}
+
+
+@router.get("/capas/{nombre_tabla}/columnas")
+@router.get("/api/capas/{nombre_tabla}/columnas")
+def capas_columnas(nombre_tabla: str):
+    """
+    Descubre columnas numéricas agregables vía information_schema (paso 2).
+
+    No requiere modelos Pydantic por columna: la lista se genera en caliente desde Postgres.
+    """
+    try:
+        with get_db() as conn:
+            columnas = listar_columnas_numericas(conn, nombre_tabla)
+    except ValueError as exc:
+        code = str(exc)
+        raise HTTPException(
+            400,
+            detail={"ok": False, "error": code, "message": "Tabla no habilitada para análisis."},
+        ) from exc
+    return {"ok": True, "tabla": nombre_tabla.lower(), "columnas": columnas, "total": len(columnas)}
+
+
+@router.post("/analisis/dinamico")
+@router.post("/api/analisis/dinamico")
+def analisis_dinamico(body: AnalisisDinamicoBody):
+    """
+    Ejecuta SUM/AVG espacial sobre campos elegidos intersectando el polígono (paso 4).
+
+    PostGIS resuelve ST_Intersects + agregaciones en una sola consulta.
+    """
+    try:
+        with get_db() as conn:
+            resultado = ejecutar_analisis_espacial(
+                conn,
+                nombre_tabla=body.tabla,
+                campos_elegidos=body.campos_elegidos,
+                geojson=body.geojson,
+                cve_mun=body.cve_mun,
+            )
+        return resultado
+    except ValueError as exc:
+        msg = str(exc)
+        err = msg.split(":", 1)[0]
+        raise HTTPException(
+            400,
+            detail={"ok": False, "error": err, "message": msg},
+        ) from exc
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": "QUERY_FAILED",
+                "message": str(exc),
+            },
+        )
+
+
+# --- Visor buffer (selección en mapa) ---
+
+
+class VisorBufferBody(BaseModel):
+    """POST /api/visor/buffer: buffer geodésico sobre un feature GeoJSON."""
+
+    geojson: Dict[str, Any] = Field(..., description="Feature o Geometry seleccionado en el mapa")
+    distance_m: float = Field(..., gt=0, le=500_000, description="Radio del buffer en metros")
+    layer_id: Optional[str] = Field(
+        None,
+        description="Id de capa del catálogo visor (p. ej. hidro_cuerpos); usa geometría PostGIS por gid",
+    )
+    source_gid: Optional[str] = Field(None, description="gid del elemento en la capa temática")
+    line_side: Optional[str] = Field(
+        None,
+        description="Inundación lateral en líneas: left, right o both (corredor)",
+    )
+
+
+_BUFFER_ERRORS = {
+    "GEOMETRIA_INVALIDA": "Geometría no válida para buffer.",
+    "DISTANCIA_INVALIDA": "Indica una distancia válida en metros (mayor que 0).",
+    "BUFFER_FALLIDO": "PostGIS no pudo generar el área de influencia.",
+    "CAPA_INVALIDA": "Capa no reconocida para buffer.",
+    "GID_NO_DISPONIBLE": "El elemento no tiene identificador en la base de datos.",
+    "ELEMENTO_NO_ENCONTRADO": "No se encontró el elemento en PostGIS.",
+    "POSTGIS_ERROR": "PostGIS no pudo procesar la geometría.",
+    "LADO_INVALIDO": "Lado de inundación no válido (left, right o both).",
+}
+
+
+def _visor_buffer_http_error(exc: Exception) -> HTTPException:
+    import logging
+
+    logging.getLogger(__name__).exception("visor buffer failed: %s", exc)
+    if isinstance(exc, ValueError):
+        code = str(exc)
+        return HTTPException(
+            400,
+            detail={
+                "ok": False,
+                "error": code,
+                "message": _BUFFER_ERRORS.get(code, code),
+            },
+        )
+    try:
+        import psycopg
+    except ImportError:
+        psycopg = None  # type: ignore
+    if psycopg is not None and isinstance(exc, psycopg.Error):
+        return HTTPException(
+            400,
+            detail={
+                "ok": False,
+                "error": "POSTGIS_ERROR",
+                "message": _BUFFER_ERRORS["POSTGIS_ERROR"],
+            },
+        )
+    return HTTPException(
+        500,
+        detail={
+            "ok": False,
+            "error": "BUFFER_INTERNO",
+            "message": "Error interno al generar el área de influencia.",
+        },
+    )
+
+
+@router.post("/visor/buffer")
+@router.post("/api/visor/buffer")
+def visor_buffer(body: VisorBufferBody):
+    try:
+        with get_db() as conn:
+            feature = buffer_geometry_geojson(
+                conn,
+                body.geojson,
+                body.distance_m,
+                layer_id=body.layer_id,
+                source_gid=body.source_gid,
+                line_side=body.line_side,
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _visor_buffer_http_error(exc) from exc
+    return {"ok": True, "feature": feature, "distance_m": body.distance_m}
+
+
+@router.get("/visor/feature-geometry")
+@router.get("/api/visor/feature-geometry")
+def visor_feature_geometry(
+    layer_id: str = Query(..., min_length=1),
+    gid: str = Query(..., min_length=1),
+):
+    """Geometría completa de un elemento (resaltado en mapa sin depender de tiles)."""
+    try:
+        with get_db() as conn:
+            feature = fetch_feature_geometry_geojson(conn, layer_id.strip().lower(), gid.strip())
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _visor_buffer_http_error(exc) from exc
+    return {"ok": True, "feature": feature}
+
+
+@router.get("/visor/feature-outline")
+@router.get("/api/visor/feature-outline")
+def visor_feature_outline(
+    layer_id: str = Query(..., min_length=1),
+    gid: str = Query(..., min_length=1),
+):
+    """Contorno simplificado de un polígono (resaltado sin artefactos de tiles)."""
+    try:
+        with get_db() as conn:
+            feature = fetch_feature_outline_geojson(conn, layer_id.strip().lower(), gid.strip())
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _visor_buffer_http_error(exc) from exc
+    return {"ok": True, "feature": feature}
+
+
 # --- Visor export ---
 
 @router.get("/visor/layers")
@@ -867,6 +1341,91 @@ def inv_bbox(
 def visor_layers_list():
     cat = layer_catalog()
     return {"ok": True, "layers": [{"id": k, **v} for k, v in cat.items()]}
+
+
+def _visor_tabular_http_error(exc: Exception) -> HTTPException:
+    raw = str(exc)
+    code = raw.split(":", 1)[0]
+    if code in ("UNKNOWN_LAYER", "MISSING_CVE_MUN", "NO_ROWS", "NO_COLUMNS"):
+        status = 404 if code == "NO_ROWS" else 400
+        return HTTPException(
+            status_code=status,
+            detail={"ok": False, "error": code, "message": tabular_error_message(code)},
+        )
+    if code == "EXPORT_FAILED":
+        return HTTPException(
+            status_code=500,
+            detail={"ok": False, "error": code, "message": tabular_error_message(code)},
+        )
+    return HTTPException(status_code=500, detail={"ok": False, "message": raw})
+
+
+@router.get("/visor/tabla/capas")
+@router.get("/api/visor/tabla/capas")
+def visor_tabular_layers_list():
+    """Catálogo de capas con consulta tabular en el visor."""
+    return {"ok": True, "layers": list_tabular_layers()}
+
+
+@router.get("/visor/tabla")
+@router.get("/api/visor/tabla")
+def visor_tabular_query(
+    layer: str = Query(..., min_length=1),
+    cve_mun: str = Query(..., min_length=1),
+):
+    """Datos tabulares de una capa del visor filtrados por municipio."""
+    try:
+        with get_db() as conn:
+            data = fetch_tabular_data(conn, layer.strip().lower(), cve_mun.strip())
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise _visor_tabular_http_error(exc) from exc
+    except Exception as exc:
+        raise _visor_tabular_http_error(exc) from exc
+    return {"ok": True, **data}
+
+
+@router.get("/visor/tabla/export")
+@router.get("/api/visor/tabla/export")
+def visor_tabular_export(
+    layer: str = Query(..., min_length=1),
+    cve_mun: str = Query(..., min_length=1),
+    format: str = Query("xlsx", alias="format"),
+):
+    """Exporta la consulta tabular a Excel (.xlsx)."""
+    fmt = (format or "xlsx").strip().lower()
+    if fmt not in ("xlsx", "excel"):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "ok": False,
+                "error": "INVALID_FORMAT",
+                "message": "format debe ser xlsx",
+            },
+        )
+    try:
+        with get_db() as conn:
+            data = fetch_tabular_data(conn, layer.strip().lower(), cve_mun.strip())
+            xlsx = build_tabular_xlsx(data)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise _visor_tabular_http_error(exc) from exc
+    except Exception as exc:
+        raise _visor_tabular_http_error(exc) from exc
+
+    cve = norm_cve_mun(cve_mun) or "mun"
+    nom = (data.get("nom_mun") or "municipio").replace(" ", "_")
+    filename = f"localidades_{nom}_{cve}.xlsx"
+    return Response(
+        content=xlsx,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.get("/visor/export")

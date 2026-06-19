@@ -5,6 +5,17 @@ from typing import Dict, List, Optional, Sequence
 _cache: Dict[str, Dict[str, str]] = {}
 
 
+def clear_column_cache(schema: str, table: Optional[str] = None) -> None:
+    """Invalida caché de columnas (p. ej. tras ALTER TABLE en runtime)."""
+    if table is None:
+        prefix = f"{schema}."
+        for key in list(_cache):
+            if key.startswith(prefix):
+                del _cache[key]
+        return
+    _cache.pop(f"{schema}.{table}", None)
+
+
 def resolve_column(
     conn,
     schema: str,
