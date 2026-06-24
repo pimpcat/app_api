@@ -1,23 +1,27 @@
 """
 Consulta tabular de capas del visor geográfico.
 
-Por ahora expone la capa «Localidades» (atlas.c_loc_punto) filtrada por municipio.
+Expone localidades (c_loc_punto), establecimientos de salud (c_clues) y capas DENUE
+filtradas por municipio (cve_mun).
 """
 
 from __future__ import annotations
 
 import io
 import logging
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from column_resolver import resolve_column
-from tables import SCHEMA, T_LOC_PUNTO, qualified
+from tables import SCHEMA, T_CLUES, T_DENUE, T_LOC_PUNTO, qualified
 from utils import mun_where_sql, norm_cve_mun, quote_ident
-from visor_layers import layer_config
+from visor_layers import denue_codigos_for_layer, layer_config
 
 logger = logging.getLogger(__name__)
 
 MAX_TABULAR_ROWS = 25_000
+
+NUMERO_FIELD = "num"
+NUMERO_LABEL = "No."
 
 TABULAR_ERRORS = {
     "UNKNOWN_LAYER": "Capa no disponible para consulta tabular.",
@@ -54,7 +58,52 @@ _LOCSPUNTO_FIELD_SPECS: Sequence[Tuple[str, Sequence[str], str]] = (
     ),
 )
 
-_TABULAR_LAYERS = frozenset({"locspunto"})
+_CLUES_FIELD_SPECS: Sequence[Tuple[str, Sequence[str], str]] = (
+    ("nom_insti", ("nom_insti",), "Nombre de la institución"),
+    ("cve_mun", ("cve_mun",), "Clave del municipio"),
+    ("mun", ("mun", "nom_mun", "municipio"), "Nombre del municipio"),
+    ("cve_loc", ("cve_loc",), "Clave de la localidad"),
+    ("loc", ("loc", "nom_loc", "localidad"), "Nombre de la localidad"),
+    ("nom_comer", ("nom_comer",), "Nombre comercial"),
+    ("nom_insadm", ("nom_insadm",), "Nombre de la institución administradora"),
+)
+
+_DENUE_FIELD_SPECS: Sequence[Tuple[str, Sequence[str], str]] = (
+    ("nom_estab", ("nom_estab",), "Nombre del establecimiento"),
+    ("nombre_act", ("nombre_act",), "Nombre de la actividad"),
+    ("cve_mun", ("cve_mun",), "Clave del municipio"),
+    ("municipio", ("municipio", "mun"), "Nombre del municipio"),
+    ("cve_loc", ("cve_loc",), "Clave de la localidad"),
+    ("localidad", ("localidad", "loc"), "Nombre de la localidad"),
+)
+
+_DENUE_DOMICILIO_PARTS: Sequence[Sequence[str]] = (
+    ("tipo_vial",),
+    ("nom_vial",),
+    ("numero_ext", "num_ext"),
+    ("tipo_asent",),
+    ("nomb_asent", "nom_asent"),
+    ("cod_postal",),
+)
+
+_DENUE_TABULAR_LAYER_IDS: Sequence[str] = (
+    "denue_rastros",
+    "denue_gasolinerias",
+    "denue_gaseras",
+    "denue_escuelas",
+    "denue_hospitales",
+    "denue_museos",
+    "denue_cementerios",
+    "denue_iglesias",
+)
+
+_TABULAR_LAYER_ORDER: Sequence[str] = (
+    "locspunto",
+    "clues",
+    *_DENUE_TABULAR_LAYER_IDS,
+)
+
+_TABULAR_LAYERS = frozenset(_TABULAR_LAYER_ORDER)
 
 
 def tabular_error_message(code: str) -> str:
@@ -64,7 +113,9 @@ def tabular_error_message(code: str) -> str:
 def list_tabular_layers() -> List[Dict[str, Any]]:
     """Capas habilitadas para el selector de consulta tabular."""
     out: List[Dict[str, Any]] = []
-    for layer_id in sorted(_TABULAR_LAYERS):
+    for layer_id in _TABULAR_LAYER_ORDER:
+        if layer_id not in _TABULAR_LAYERS:
+            continue
         cfg = layer_config(layer_id)
         if not cfg:
             continue
@@ -72,10 +123,208 @@ def list_tabular_layers() -> List[Dict[str, Any]]:
             {
                 "id": layer_id,
                 "label": cfg.get("label") or layer_id,
-                "table": cfg.get("table"),
+                "table": cfg.get("table") or T_DENUE,
             }
         )
     return out
+
+
+def _resolve_field_specs(
+    conn,
+    table: str,
+    specs: Sequence[Tuple[str, Sequence[str], str]],
+) -> List[Dict[str, str]]:
+    resolved: List[Dict[str, str]] = []
+    for key, candidates, label in specs:
+        col = resolve_column(conn, SCHEMA, table, candidates)
+        if not col:
+            logger.warning("Columna no encontrada en %s: %s", table, candidates)
+            continue
+        resolved.append({"field": key, "sql": col, "label": label})
+    if not resolved:
+        raise ValueError("NO_COLUMNS")
+    return resolved
+
+
+def _resolve_clues_columns(conn) -> List[Dict[str, str]]:
+    return _resolve_field_specs(conn, T_CLUES, _CLUES_FIELD_SPECS)
+
+
+def _sql_domicilio_denue(conn, alias: str = "pt") -> str:
+    parts: List[str] = []
+    for candidates in _DENUE_DOMICILIO_PARTS:
+        col = resolve_column(conn, SCHEMA, T_DENUE, candidates)
+        if not col:
+            continue
+        q = f"{alias}.{quote_ident(col)}"
+        parts.append(f"NULLIF(TRIM(COALESCE({q}::text, '')), '')")
+    if not parts:
+        return "NULL::text"
+    return f"NULLIF(TRIM(CONCAT_WS(' ', {', '.join(parts)})), '')"
+
+
+def _resolve_denue_columns(conn) -> List[Dict[str, str]]:
+    resolved = _resolve_field_specs(conn, T_DENUE, _DENUE_FIELD_SPECS)
+    domicilio_sql = _sql_domicilio_denue(conn, "pt")
+    out: List[Dict[str, str]] = []
+    for col in resolved:
+        out.append(col)
+        if col["field"] == "nombre_act":
+            out.append({"field": "domicilio", "sql": domicilio_sql, "label": "Domicilio", "computed": True})
+    if not any(c["field"] == "domicilio" for c in out):
+        out.insert(2, {"field": "domicilio", "sql": domicilio_sql, "label": "Domicilio", "computed": True})
+    return out
+
+
+def _columns_public(columns: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    return [{"field": c["field"], "label": c["label"]} for c in columns]
+
+
+def _columns_with_numero(columns: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    return [{"field": NUMERO_FIELD, "label": NUMERO_LABEL}, *_columns_public(columns)]
+
+
+def _rows_with_numero(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [{NUMERO_FIELD: i, **row} for i, row in enumerate(rows, start=1)]
+
+
+def _build_select_parts(columns: List[Dict[str, str]], alias: str) -> List[str]:
+    parts: List[str] = []
+    for col in columns:
+        expr = col["sql"]
+        if col.get("computed"):
+            parts.append(f"({expr}) AS {quote_ident(col['field'])}")
+        else:
+            parts.append(f"{alias}.{quote_ident(col['sql'])} AS {quote_ident(col['field'])}")
+    return parts
+
+
+def _sql_codigo_act_filter(alias: str, codes: Sequence[int]) -> str:
+    safe = [int(c) for c in codes if str(c).isdigit()]
+    if not safe:
+        return "FALSE"
+    col = f"regexp_replace(TRIM({alias}.codigo_act::text), '[^0-9]', '', 'g')"
+    tests = " OR ".join(f"{col} = '{c}'" for c in safe)
+    return f"({tests})"
+
+
+def _execute_detail_query(
+    conn,
+    *,
+    columns: List[Dict[str, str]],
+    select_parts: List[str],
+    from_sql: str,
+    where_sql: str,
+    params: Mapping[str, Any],
+    order_by: str,
+    with_clause: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    prefix = f"WITH {with_clause}\n" if with_clause else ""
+    sql = f"""
+        {prefix}
+        SELECT {", ".join(select_parts)}
+          FROM {from_sql}
+         WHERE {where_sql}
+         ORDER BY {order_by}
+         LIMIT {MAX_TABULAR_ROWS + 1}
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, dict(params))
+        raw_rows = cur.fetchall()
+
+    truncated = len(raw_rows) > MAX_TABULAR_ROWS
+    if truncated:
+        raw_rows = raw_rows[:MAX_TABULAR_ROWS]
+
+    rows: List[Dict[str, Any]] = []
+    for row in raw_rows:
+        item: Dict[str, Any] = {}
+        for col in columns:
+            key = col["field"]
+            item[key] = _serialize_cell(row.get(key) if isinstance(row, dict) else None)
+        rows.append(item)
+    return rows, truncated
+
+
+def list_clues_detail_rows(
+    conn,
+    *,
+    where_sql: str,
+    params: Mapping[str, Any],
+    from_sql: Optional[str] = None,
+    with_clause: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Filas detalle CLUES (con columna No.)."""
+    columns = _resolve_clues_columns(conn)
+    alias = "pt"
+    select_parts = _build_select_parts(columns, alias)
+    order_nom = next((c["sql"] for c in columns if c["field"] == "nom_comer"), None)
+    order_gid = resolve_column(conn, SCHEMA, T_CLUES, ("gid",)) or columns[0]["sql"]
+    order_by = (
+        f"LOWER(TRIM(COALESCE({alias}.{quote_ident(order_nom)}::text, ''))) ASC NULLS LAST, "
+        f"{alias}.{quote_ident(order_gid)} ASC"
+        if order_nom
+        else f"{alias}.{quote_ident(order_gid)} ASC"
+    )
+    rows, truncated = _execute_detail_query(
+        conn,
+        columns=columns,
+        select_parts=select_parts,
+        from_sql=from_sql or f"{qualified(T_CLUES)} {alias}",
+        where_sql=where_sql,
+        params=params,
+        order_by=order_by,
+        with_clause=with_clause,
+    )
+    return {
+        "columns": _columns_with_numero(columns),
+        "rows": _rows_with_numero(rows),
+        "filas_truncadas": truncated,
+    }
+
+
+def list_denue_detail_rows(
+    conn,
+    *,
+    codigo_act: Sequence[int],
+    where_sql: str,
+    params: Mapping[str, Any],
+    from_sql: Optional[str] = None,
+    with_clause: Optional[str] = None,
+    apply_codigo_filter: bool = True,
+) -> Dict[str, Any]:
+    """Filas detalle DENUE (con columna No. y domicilio concatenado)."""
+    columns = _resolve_denue_columns(conn)
+    alias = "pt"
+    select_parts = _build_select_parts(columns, alias)
+    order_nom = next((c["sql"] for c in columns if c["field"] == "nom_estab"), None)
+    order_gid = resolve_column(conn, SCHEMA, T_DENUE, ("gid",)) or columns[0]["sql"]
+    order_by = (
+        f"LOWER(TRIM(COALESCE({alias}.{quote_ident(order_nom)}::text, ''))) ASC NULLS LAST, "
+        f"{alias}.{quote_ident(order_gid)} ASC"
+        if order_nom
+        else f"{alias}.{quote_ident(order_gid)} ASC"
+    )
+    code_filter = _sql_codigo_act_filter(alias, codigo_act)
+    if apply_codigo_filter:
+        full_where = f"({where_sql}) AND {code_filter}" if where_sql else code_filter
+    else:
+        full_where = where_sql
+    rows, truncated = _execute_detail_query(
+        conn,
+        columns=columns,
+        select_parts=select_parts,
+        from_sql=from_sql or f"{qualified(T_DENUE)} {alias}",
+        where_sql=full_where,
+        params=params,
+        order_by=order_by,
+        with_clause=with_clause,
+    )
+    return {
+        "columns": _columns_with_numero(columns),
+        "rows": _rows_with_numero(rows),
+        "filas_truncadas": truncated,
+    }
 
 
 def _resolve_locspunto_columns(conn) -> List[Dict[str, str]]:
@@ -176,8 +425,74 @@ def fetch_locspunto_table(conn, cve_mun: str) -> Dict[str, Any]:
         "cve_mun": cve,
         "nom_mun": nom_mun,
         "total_registros": len(rows),
+        "summary_label": "Localidades en el municipio",
         "columns": [{"field": c["field"], "label": c["label"]} for c in columns],
         "rows": rows,
+    }
+
+
+def fetch_clues_table(conn, cve_mun: str) -> Dict[str, Any]:
+    cve = norm_cve_mun(cve_mun)
+    if not cve:
+        raise ValueError("MISSING_CVE_MUN")
+
+    detail = list_clues_detail_rows(
+        conn,
+        where_sql=mun_where_sql("pt", with_cvegeo=False),
+        params={"cve": cve},
+    )
+    rows = detail["rows"]
+    if not rows:
+        raise ValueError("NO_ROWS")
+
+    nom_mun = _fetch_nom_mun(conn, cve)
+    return {
+        "layer": "clues",
+        "layer_label": (layer_config("clues") or {}).get("label", "Establecimientos de salud"),
+        "table": T_CLUES,
+        "cve_mun": cve,
+        "nom_mun": nom_mun,
+        "total_registros": len(rows),
+        "summary_label": "Establecimientos en el municipio",
+        "columns": detail["columns"],
+        "rows": rows,
+        "filas_truncadas": detail.get("filas_truncadas", False),
+    }
+
+
+def fetch_denue_table(conn, layer_id: str, cve_mun: str) -> Dict[str, Any]:
+    cve = norm_cve_mun(cve_mun)
+    if not cve:
+        raise ValueError("MISSING_CVE_MUN")
+
+    key = (layer_id or "").strip().lower()
+    codes = denue_codigos_for_layer(key)
+    if not codes:
+        raise ValueError("UNKNOWN_LAYER")
+
+    detail = list_denue_detail_rows(
+        conn,
+        codigo_act=codes,
+        where_sql=mun_where_sql("pt", with_cvegeo=False),
+        params={"cve": cve},
+    )
+    rows = detail["rows"]
+    if not rows:
+        raise ValueError("NO_ROWS")
+
+    nom_mun = _fetch_nom_mun(conn, cve)
+    cfg = layer_config(key) or {}
+    return {
+        "layer": key,
+        "layer_label": cfg.get("label") or key,
+        "table": T_DENUE,
+        "cve_mun": cve,
+        "nom_mun": nom_mun,
+        "total_registros": len(rows),
+        "summary_label": "Establecimientos en el municipio",
+        "columns": detail["columns"],
+        "rows": rows,
+        "filas_truncadas": detail.get("filas_truncadas", False),
     }
 
 
@@ -187,6 +502,10 @@ def fetch_tabular_data(conn, layer_id: str, cve_mun: str) -> Dict[str, Any]:
         raise ValueError("UNKNOWN_LAYER")
     if key == "locspunto":
         return fetch_locspunto_table(conn, cve_mun)
+    if key == "clues":
+        return fetch_clues_table(conn, cve_mun)
+    if key in _DENUE_TABULAR_LAYER_IDS:
+        return fetch_denue_table(conn, key, cve_mun)
     raise ValueError("UNKNOWN_LAYER")
 
 
@@ -201,7 +520,8 @@ def build_tabular_xlsx(payload: Dict[str, Any]) -> bytes:
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "Localidades"
+    layer_label = payload.get("layer_label") or "Consulta tabular"
+    ws.title = str(layer_label)[:31]
 
     title_font = Font(name="Calibri", size=14, bold=True, color="FFFFFF")
     header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
@@ -218,9 +538,10 @@ def build_tabular_xlsx(payload: Dict[str, Any]) -> bytes:
     nom_mun = payload.get("nom_mun") or ""
     cve_mun = payload.get("cve_mun") or ""
     total = payload.get("total_registros", len(rows))
+    summary_label = payload.get("summary_label") or "Total de registros"
 
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(len(columns), 2))
-    title_cell = ws.cell(row=1, column=1, value=f"Localidades — {nom_mun} ({cve_mun})")
+    title_cell = ws.cell(row=1, column=1, value=f"{layer_label} — {nom_mun} ({cve_mun})")
     title_cell.font = title_font
     title_cell.fill = title_fill
     title_cell.alignment = Alignment(horizontal="left", vertical="center")
@@ -229,8 +550,8 @@ def build_tabular_xlsx(payload: Dict[str, Any]) -> bytes:
     meta_rows = [
         ("Municipio", nom_mun or "—"),
         ("Clave municipal", cve_mun),
-        ("Total de localidades", total),
-        ("Capa", payload.get("layer_label") or "Localidades"),
+        (summary_label, total),
+        ("Capa", layer_label),
         ("Tabla origen", f"atlas.{payload.get('table', T_LOC_PUNTO)}"),
     ]
     r = 3

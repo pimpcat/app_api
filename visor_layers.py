@@ -181,3 +181,22 @@ def layer_config(layer_id: str) -> Optional[Dict[str, Any]]:
     if not key:
         return None
     return layer_catalog().get(key)
+
+
+_DENUE_LAYER_CODIGOS: Dict[str, Sequence[int]] = {
+    "denue_rastros": (311611,),
+    "denue_gasolinerias": (468411,),
+    "denue_gaseras": (468412,),
+    "denue_escuelas": DENUE_ESCUELAS_CODIGOS,
+    "denue_hospitales": (622112,),
+    "denue_museos": (712112,),
+    "denue_cementerios": (812322,),
+    "denue_iglesias": (813210,),
+}
+
+
+def denue_codigos_for_layer(layer_id: str) -> Optional[Sequence[int]]:
+    """Códigos SCIAN (codigo_act) asociados a una capa DENUE del visor."""
+    key = (layer_id or "").strip().lower()
+    codes = _DENUE_LAYER_CODIGOS.get(key)
+    return codes if codes else None

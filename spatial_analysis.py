@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from tables import SCHEMA, T_C_INV, T_CLUES, T_DENUE, T_ITER, T_LOC_PUNTO, qualified
 from utils import norm_cve_mun, quote_ident
+from visor_tabular import list_clues_detail_rows, list_denue_detail_rows
 
 # ---------------------------------------------------------------------------
 # Catálogo de capas habilitadas para análisis espacial (extensible).
@@ -82,7 +83,7 @@ for _denue in _DENUE_CAPAS_SPECS:
 CAPAS_ANALISIS["clues"] = {
     "id": "clues",
     "tabla": T_CLUES,
-    "etiqueta": "Establecimientos de salud / Secretaría de Salud",
+    "etiqueta": "Establecimientos de salud",
     "descripcion": "Establecimientos de salud (atlas.c_clues)",
     "geom_column": "the_geom",
     "modo": "conteo",
@@ -706,6 +707,30 @@ def _ejecutar_conteo_puntos(
 
     n = int(row.get("registros_intersectados") or 0)
     etiqueta = meta["etiqueta"]
+
+    detail: Dict[str, Any] = {"columns": [], "rows": [], "filas_truncadas": False}
+    if n > 0:
+        poly_cte = f"poly AS (\n            {poly_sql}\n        )"
+        from_pt = f"{q_tbl} {alias} CROSS JOIN poly"
+        if meta["id"] == "clues":
+            detail = list_clues_detail_rows(
+                conn,
+                where_sql=where_sql,
+                params=params,
+                from_sql=from_pt,
+                with_clause=poly_cte,
+            )
+        elif meta.get("codigo_act"):
+            detail = list_denue_detail_rows(
+                conn,
+                codigo_act=meta["codigo_act"],
+                where_sql=where_sql,
+                params=params,
+                from_sql=from_pt,
+                with_clause=poly_cte,
+                apply_codigo_filter=False,
+            )
+
     return {
         "ok": True,
         "modo": "conteo",
@@ -724,6 +749,9 @@ def _ejecutar_conteo_puntos(
                 "valor": n,
             }
         ],
+        "columns": detail.get("columns") or [],
+        "rows": detail.get("rows") or [],
+        "filas_truncadas": bool(detail.get("filas_truncadas")),
         "cve_mun": cve,
     }
 
