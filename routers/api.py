@@ -39,8 +39,9 @@ from visor_tabular import (
     tabular_error_message,
 )
 from visor_buffer import buffer_geometry_geojson, fetch_feature_geometry_geojson, fetch_feature_outline_geojson
-from geocoder import buscar_lugares
+from geocoder import buscar_lugares, fetch_lugar_geometria
 from spatial_analysis import (
+    detectar_capas_intersectantes,
     ejecutar_analisis_espacial,
     listar_capas_disponibles,
     listar_columnas_numericas,
@@ -248,8 +249,9 @@ def buscar(
     ),
 ):
     """
-    Geocoder local: localidades (c_loc_punto) y colonias (c_col_ase) dentro del municipio.
-    Sin ``cve_mun`` válido devuelve municipios, localidades y colonias a nivel estatal.
+    Geocoder local: localidades puntuales (c_loc_punto), localidades con amanzanamiento (c_l)
+    y colonias (c_col_ase) dentro del municipio.
+    Sin ``cve_mun`` válido también incluye municipios (c_mun) a nivel estatal.
     """
     term = q.strip()
     cve = norm_cve_mun(cve_mun)
@@ -262,6 +264,25 @@ def buscar(
         "count": len(rows),
         "rows": rows,
     }
+
+
+@router.get("/buscar/geometria")
+@router.get("/api/buscar/geometria")
+def buscar_geometria(
+    tabla: str = Query(..., min_length=2, max_length=64),
+    cvegeo: str = Query(..., min_length=1, max_length=32),
+):
+    """Geometría WGS84 del resultado del buscador (colonias, localidades con amanzanamiento, municipios)."""
+    try:
+        feature = fetch_lugar_geometria(tabla, cvegeo)
+    except ValueError as exc:
+        code = str(exc)
+        status = 404 if code == "GEOMETRIA_NO_ENCONTRADA" else 400
+        raise HTTPException(
+            status_code=status,
+            detail={"ok": False, "error": code, "message": code},
+        ) from exc
+    return {"ok": True, "feature": feature}
 
 
 @router.get("/municipio/extent")
@@ -1144,7 +1165,14 @@ class AnalisisDinamicoBody(BaseModel):
     """Cuerpo POST /api/analisis/dinamico: polígono GeoJSON y columnas a agregar."""
 
     tabla: str = Field(..., description="Identificador de capa (ej. c_inv)")
-    campos_elegidos: List[str] = Field(..., min_length=1)
+    campos_elegidos: List[str] = Field(default_factory=list)
+    geojson: Dict[str, Any] = Field(..., description="Feature, Geometry o FeatureCollection")
+    cve_mun: Optional[str] = Field(None, description="Filtro municipal opcional (3 dígitos)")
+
+
+class AnalisisIntersectBody(BaseModel):
+    """Cuerpo POST /api/analisis/capas-intersectantes: polígono para filtrar capas."""
+
     geojson: Dict[str, Any] = Field(..., description="Feature, Geometry o FeatureCollection")
     cve_mun: Optional[str] = Field(None, description="Filtro municipal opcional (3 dígitos)")
 
@@ -1154,6 +1182,36 @@ class AnalisisDinamicoBody(BaseModel):
 def analisis_listar_capas():
     """Catálogo de capas disponibles para análisis espacial (paso 1 del flujo UI)."""
     return {"ok": True, "capas": listar_capas_disponibles()}
+
+
+@router.post("/analisis/capas-intersectantes")
+@router.post("/api/analisis/capas-intersectantes")
+def analisis_capas_intersectantes(body: AnalisisIntersectBody):
+    """Capas INV/ITER con al menos un registro dentro del polígono dibujado."""
+    try:
+        with get_db() as conn:
+            capas = detectar_capas_intersectantes(
+                conn,
+                geojson=body.geojson,
+                cve_mun=body.cve_mun,
+            )
+        return {"ok": True, "capas": capas, "total": len(capas)}
+    except ValueError as exc:
+        msg = str(exc)
+        err = msg.split(":", 1)[0]
+        raise HTTPException(
+            400,
+            detail={"ok": False, "error": err, "message": msg},
+        ) from exc
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": "QUERY_FAILED",
+                "message": str(exc),
+            },
+        )
 
 
 @router.get("/capas/{nombre_tabla}/columnas")

@@ -35,6 +35,7 @@ T_CURNIVEL = "curnivel"
 T_TAB_MUNICIPAL = "tab_municipal"
 T_TAB_NACIONAL = "tab_nacional"
 T_C_INV = "c_inv"
+T_ITER = "iter"
 T_USO_SUELO = "usosuelo"
 
 

@@ -9,6 +9,21 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def default_cors_origins() -> list[str]:
+    """Orígenes del portal vía Nginx (PORT_NGINX en .env, p. ej. 850)."""
+    origins = [
+        "http://localhost",
+        "http://127.0.0.1",
+        "http://localhost:80",
+        "http://127.0.0.1:80",
+    ]
+    port = os.getenv("PORT_NGINX", "850").strip()
+    if port and port not in ("80", "443"):
+        origins.append(f"http://localhost:{port}")
+        origins.append(f"http://127.0.0.1:{port}")
+    return origins
+
+
 def database_name_from_url(db_url: str) -> str:
     """Nombre de la base PostgreSQL en la URL (sin credenciales)."""
     if not db_url:
@@ -37,10 +52,8 @@ def get_settings():
         "schema": os.getenv("ATLAS_SCHEMA", "atlas").strip() or "atlas",
         "cors_origins": [
             o.strip()
-            for o in os.getenv(
-                "CORS_ORIGINS",
-                "http://localhost,http://127.0.0.1,http://localhost:80,http://127.0.0.1:80",
-            ).split(",")
+            for o in os.getenv("CORS_ORIGINS", "").split(",")
             if o.strip()
-        ],
+        ]
+        or default_cors_origins(),
     }
