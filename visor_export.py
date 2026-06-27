@@ -41,6 +41,10 @@ def export_error_message(code: str) -> str:
     return EXPORT_ERRORS.get(code, code)
 
 
+def layer_uses_mun_filter(cfg: Dict[str, Any]) -> bool:
+    return cfg.get("mun_filter") is not False
+
+
 def layer_uses_cvegeo_filter(conn, cfg: Dict[str, Any]) -> bool:
     if "mun_filter_cvegeo" in cfg:
         return bool(cfg["mun_filter_cvegeo"])
@@ -70,6 +74,7 @@ def table_attribute_columns(
     conn,
     table: str,
     geom_col: str = "the_geom",
+    exclude: Optional[Sequence[str]] = None,
 ) -> List[str]:
     with conn.cursor() as cur:
         cur.execute(
@@ -81,12 +86,89 @@ def table_attribute_columns(
         )
         skip_udt = {"geometry", "geography", "bytea"}
         geom_key = (geom_col or "the_geom").lower()
+        skip_names = {geom_key, "the_geom", "geom", "wkb_geometry"}
+        if exclude:
+            skip_names.update(str(c).lower() for c in exclude)
         cols: List[str] = []
         for r in cur.fetchall():
             name = (r["column_name"] or "").lower()
-            if name and name != geom_key and r["udt_name"] not in skip_udt:
+            if name and name not in skip_names and r["udt_name"] not in skip_udt:
                 cols.append(name)
         return cols
+
+
+def _normalize_export_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    export = cfg.get("export")
+    if isinstance(export, str):
+        return {"mode": export.strip().lower() or "all"}
+    if isinstance(export, dict):
+        return dict(export)
+
+    out: Dict[str, Any] = {"mode": "all"}
+    if cfg.get("shp_all_table_columns"):
+        out["mode"] = "all"
+    elif cfg.get("export_columns") or cfg.get("export_columns_kml"):
+        out["mode"] = "columns"
+        if cfg.get("export_columns"):
+            out["columns"] = list(cfg["export_columns"])
+        if cfg.get("export_columns_kml"):
+            out["columns_kml"] = list(cfg["export_columns_kml"])
+    return out
+
+
+def _export_column_source_table(cfg: Dict[str, Any]) -> str:
+    return str(
+        cfg.get("export_table")
+        or cfg.get("gid_table")
+        or cfg.get("table")
+        or ""
+    ).strip()
+
+
+def _pick_explicit_columns(
+    conn,
+    cfg: Dict[str, Any],
+    export: Dict[str, Any],
+    fmt: str,
+    geom_col: str,
+) -> List[str]:
+    fmt_key = "columns_kml" if fmt == "kml" else "columns_shp"
+    legacy_key = "export_columns_kml" if fmt == "kml" else "export_columns_shp"
+    explicit = (
+        export.get(fmt_key)
+        or export.get("columns")
+        or cfg.get(legacy_key)
+        or (cfg.get("export_columns") if fmt == "kml" else None)
+    )
+    if not explicit:
+        return []
+
+    source = _export_column_source_table(cfg)
+    if not source:
+        return [c for c in explicit if c.lower() != geom_col]
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT column_name FROM information_schema.columns
+             WHERE table_schema = %s AND table_name = %s
+            """,
+            (SCHEMA, source),
+        )
+        all_cols = {r["column_name"].lower() for r in cur.fetchall()}
+    return [
+        c for c in explicit
+        if c.lower() in all_cols and c.lower() != geom_col
+    ]
+
+
+def _from_sql_subquery_is_full_table(cfg: Dict[str, Any]) -> bool:
+    """True si el subquery expone todas las columnas de la tabla (p. ej. DENUE SELECT *)."""
+    if cfg.get("export_subquery_full"):
+        return True
+    sql = (cfg.get("from_sql") or "").upper()
+    compact = " ".join(sql.split())
+    return "SELECT *" in compact
 
 
 def layer_attribute_columns(
@@ -95,38 +177,30 @@ def layer_attribute_columns(
     fmt: str = "kml",
 ) -> List[str]:
     geom_col = layer_geom_column(conn, cfg).lower()
-    export_key = "export_columns_kml" if fmt == "kml" else "export_columns_shp"
-    explicit = cfg.get(export_key) or (cfg.get("export_columns") if fmt == "kml" else None)
-
-    if fmt == "shp" and cfg.get("shp_all_table_columns") and cfg.get("gid_table"):
-        return table_attribute_columns(conn, str(cfg["gid_table"]), geom_col)
+    export = _normalize_export_cfg(cfg)
+    mode = (export.get("mode") or "all").lower()
+    exclude = [str(c) for c in (export.get("exclude") or [])]
 
     if cfg.get("from_sql"):
-        if explicit:
-            return list(explicit)
+        picked = _pick_explicit_columns(conn, cfg, export, fmt, geom_col)
+        if picked:
+            return picked
+        source = _export_column_source_table(cfg)
+        if source and mode == "all" and _from_sql_subquery_is_full_table(cfg):
+            return table_attribute_columns(conn, source, geom_col, exclude=exclude)
+        # Subquery acotado (RNC simplificada) u otro preset sin SELECT *
         return ["gid", "cve_mun", "tipo_vial"]
 
-    table = cfg.get("table", "")
-    if explicit:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT column_name FROM information_schema.columns
-                 WHERE table_schema = %s AND table_name = %s
-                """,
-                (SCHEMA, table),
-            )
-            all_cols = {r["column_name"].lower() for r in cur.fetchall()}
-        picked = [
-            c for c in explicit
-            if c.lower() in all_cols and c.lower() != geom_col
-        ]
+    source = _export_column_source_table(cfg)
+    if not source:
+        return []
+
+    if mode == "columns":
+        picked = _pick_explicit_columns(conn, cfg, export, fmt, geom_col)
         if picked:
             return picked
 
-    if table:
-        return table_attribute_columns(conn, table, geom_col)
-    return []
+    return table_attribute_columns(conn, source, geom_col, exclude=exclude)
 
 
 def _geom_expr(geom_col: str) -> str:
@@ -139,28 +213,39 @@ def build_select_sql(
     cols: Sequence[str],
     with_cvegeo: bool,
     geom_col: str,
+    apply_mun_filter: bool = True,
 ) -> str:
     attr = ", ".join(quote_ident(c) for c in cols)
     geom = _geom_expr(geom_col)
-    where = mun_where_sql("", with_cvegeo)
     q_geom = quote_ident(geom_col)
+    where_parts = [f"{q_geom} IS NOT NULL"]
+    if apply_mun_filter:
+        where_parts.append(mun_where_sql("", with_cvegeo))
+    where = " AND ".join(where_parts)
     if cfg.get("from_sql"):
         return (
             f"SELECT {attr}, {geom} FROM {cfg['from_sql']}"
-            f" WHERE {q_geom} IS NOT NULL AND {where} LIMIT {MAX_FEATURES}"
+            f" WHERE {where} LIMIT {MAX_FEATURES}"
         )
     table = qualified(cfg["table"])
     return (
         f"SELECT {attr}, {geom} FROM {table}"
-        f" WHERE {q_geom} IS NOT NULL AND {where} LIMIT {MAX_FEATURES}"
+        f" WHERE {where} LIMIT {MAX_FEATURES}"
     )
 
 
-def build_count_sql(cfg: Dict[str, Any], with_cvegeo: bool, geom_col: str) -> str:
-    where = mun_where_sql("", with_cvegeo)
+def build_count_sql(
+    cfg: Dict[str, Any],
+    with_cvegeo: bool,
+    geom_col: str,
+    apply_mun_filter: bool = True,
+) -> str:
+    where_parts = [f"{quote_ident(geom_col)} IS NOT NULL"]
+    if apply_mun_filter:
+        where_parts.append(mun_where_sql("", with_cvegeo))
+    where = " AND ".join(where_parts)
     from_part = cfg["from_sql"] if cfg.get("from_sql") else qualified(cfg["table"])
-    q_geom = quote_ident(geom_col)
-    return f"SELECT COUNT(*)::int AS n FROM {from_part} WHERE {q_geom} IS NOT NULL AND {where}"
+    return f"SELECT COUNT(*)::int AS n FROM {from_part} WHERE {where}"
 
 
 def _coord_pairs(coords: Sequence) -> List[str]:
@@ -171,51 +256,85 @@ def _coord_pairs(coords: Sequence) -> List[str]:
     return pairs
 
 
+def _kml_ground_line_extras() -> str:
+    return "<tessellate>1</tessellate><altitudeMode>clampToGround</altitudeMode>"
+
+
+def _kml_line_string(pairs: Sequence[str]) -> str:
+    if len(pairs) < 2:
+        return ""
+    return (
+        f"<LineString>{_kml_ground_line_extras()}"
+        f"<coordinates>{' '.join(pairs)}</coordinates></LineString>"
+    )
+
+
+def flatten_geometries_for_export(geom: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Descompone geometrías compuestas (como el export SHP: un trazo por parte)."""
+    gtype = geom.get("type")
+    if gtype == "GeometryCollection":
+        out: List[Dict[str, Any]] = []
+        for part in geom.get("geometries") or []:
+            if isinstance(part, dict):
+                out.extend(flatten_geometries_for_export(part))
+        return out
+    return normalize_geometries_for_shp(geom)
+
+
 def geojson_to_kml_fragment(geom: Dict[str, Any]) -> str:
     gtype = geom.get("type")
     coords = geom.get("coordinates")
     if gtype == "Point" and coords:
-        return f"<Point><coordinates>{float(coords[0])},{float(coords[1])},0</coordinates></Point>"
+        return (
+            "<Point><altitudeMode>clampToGround</altitudeMode>"
+            f"<coordinates>{float(coords[0])},{float(coords[1])},0</coordinates></Point>"
+        )
     if gtype == "LineString" and coords:
-        pairs = _coord_pairs(coords)
-        if not pairs:
-            return ""
-        return f"<LineString><coordinates>{' '.join(pairs)}</coordinates></LineString>"
+        return _kml_line_string(_coord_pairs(coords))
     if gtype == "MultiLineString" and coords:
         parts = []
         for line in coords:
-            pairs = _coord_pairs(line)
-            if pairs:
-                parts.append(f"<LineString><coordinates>{' '.join(pairs)}</coordinates></LineString>")
+            frag = _kml_line_string(_coord_pairs(line))
+            if frag:
+                parts.append(frag)
         if not parts:
             return ""
+        if len(parts) == 1:
+            return parts[0]
         return f"<MultiGeometry>{''.join(parts)}</MultiGeometry>"
     if gtype == "Polygon" and coords:
         rings = []
-        for ring in coords:
+        for i, ring in enumerate(coords):
             pairs = _coord_pairs(ring)
             if pairs:
+                tag = "outerBoundaryIs" if i == 0 else "innerBoundaryIs"
                 rings.append(
-                    f"<outerBoundaryIs><LinearRing><coordinates>{' '.join(pairs)}</coordinates></LinearRing></outerBoundaryIs>"
+                    f"<{tag}><LinearRing><coordinates>{' '.join(pairs)}</coordinates></LinearRing></{tag}>"
                 )
         if not rings:
             return ""
-        return f"<Polygon>{''.join(rings)}</Polygon>"
+        return (
+            f"<Polygon><extrude>0</extrude><tessellate>1</tessellate>"
+            f"<altitudeMode>clampToGround</altitudeMode>{''.join(rings)}</Polygon>"
+        )
     if gtype == "MultiPolygon" and coords:
         polys = []
         for poly in coords:
             if not poly:
                 continue
             rings = []
-            for ring in poly:
+            for i, ring in enumerate(poly):
                 pairs = _coord_pairs(ring)
                 if pairs:
-                    tag = "outerBoundaryIs" if not rings else "innerBoundaryIs"
+                    tag = "outerBoundaryIs" if i == 0 else "innerBoundaryIs"
                     rings.append(
                         f"<{tag}><LinearRing><coordinates>{' '.join(pairs)}</coordinates></LinearRing></{tag}>"
                     )
             if rings:
-                polys.append(f"<Polygon>{''.join(rings)}</Polygon>")
+                polys.append(
+                    "<Polygon><extrude>0</extrude><tessellate>1</tessellate>"
+                    f"<altitudeMode>clampToGround</altitudeMode>{''.join(rings)}</Polygon>"
+                )
         if not polys:
             return ""
         if len(polys) == 1:
@@ -225,9 +344,14 @@ def geojson_to_kml_fragment(geom: Dict[str, Any]) -> str:
         pts = []
         for pt in coords:
             if isinstance(pt, (list, tuple)) and len(pt) >= 2:
-                pts.append(f"<Point><coordinates>{float(pt[0])},{float(pt[1])},0</coordinates></Point>")
+                pts.append(
+                    "<Point><altitudeMode>clampToGround</altitudeMode>"
+                    f"<coordinates>{float(pt[0])},{float(pt[1])},0</coordinates></Point>"
+                )
         if not pts:
             return ""
+        if len(pts) == 1:
+            return pts[0]
         return f"<MultiGeometry>{''.join(pts)}</MultiGeometry>"
     return ""
 
@@ -285,21 +409,26 @@ def stream_kml(
             geom = json.loads(gj)
         except json.JSONDecodeError:
             continue
-        kml_geom = geojson_to_kml_fragment(geom)
-        if not kml_geom:
+        parts = flatten_geometries_for_export(geom)
+        if not parts:
             continue
-        name = escape(_pick_placemark_name(row, cols))
+        base_name = _pick_placemark_name(row, cols)
         desc = _attr_table_html(row, cols)
-        buf.write(b"<Placemark>\n")
-        buf.write(f"<name>{name}</name>\n".encode())
-        buf.write(f"<description><![CDATA[{desc}]]></description>\n".encode())
-        buf.write(b"<ExtendedData>\n")
-        for c in cols:
-            val = escape(str(row.get(c, "") or ""))
-            buf.write(f'<Data name="{escape(str(c))}"><value>{val}</value></Data>\n'.encode())
-        buf.write(b"</ExtendedData>\n")
-        buf.write(kml_geom.encode())
-        buf.write(b"\n</Placemark>\n")
+        for i, part in enumerate(parts):
+            kml_geom = geojson_to_kml_fragment(part)
+            if not kml_geom:
+                continue
+            name = base_name if len(parts) == 1 else f"{base_name} ({i + 1})"
+            buf.write(b"<Placemark>\n")
+            buf.write(f"<name>{escape(name)}</name>\n".encode())
+            buf.write(f"<description><![CDATA[{desc}]]></description>\n".encode())
+            buf.write(b"<ExtendedData>\n")
+            for c in cols:
+                val = escape(str(row.get(c, "") or ""))
+                buf.write(f'<Data name="{escape(str(c))}"><value>{val}</value></Data>\n'.encode())
+            buf.write(b"</ExtendedData>\n")
+            buf.write(kml_geom.encode())
+            buf.write(b"\n</Placemark>\n")
     buf.write(b"</Document></kml>")
     return buf.getvalue()
 
@@ -323,7 +452,63 @@ def normalize_geometries_for_shp(geom: Dict[str, Any]) -> List[Dict[str, Any]]:
         return [{"type": "Polygon", "coordinates": coords}]
     if gtype == "MultiPolygon" and coords:
         return [{"type": "Polygon", "coordinates": poly} for poly in coords if poly]
+    if gtype == "GeometryCollection":
+        out: List[Dict[str, Any]] = []
+        for part in geom.get("geometries") or []:
+            if isinstance(part, dict):
+                out.extend(normalize_geometries_for_shp(part))
+        return out
     return []
+
+
+def _geom_family(gtype: Optional[str]) -> str:
+    if gtype in ("Point", "MultiPoint"):
+        return "point"
+    if gtype in ("LineString", "MultiLineString"):
+        return "line"
+    if gtype in ("Polygon", "MultiPolygon"):
+        return "polygon"
+    return ""
+
+
+def _infer_export_geom_type(rows: Sequence[Dict[str, Any]], catalog_type: Optional[str]) -> str:
+    counts = {"point": 0, "line": 0, "polygon": 0}
+    for row in rows:
+        gj = row.get("geom_json")
+        if not gj:
+            continue
+        try:
+            geom = json.loads(gj)
+        except json.JSONDecodeError:
+            continue
+        for part in normalize_geometries_for_shp(geom):
+            family = _geom_family(part.get("type"))
+            if family:
+                counts[family] += 1
+    if counts["polygon"] > 0:
+        return "polygon"
+    if counts["line"] > 0:
+        return "line"
+    if counts["point"] > 0:
+        return "point"
+    return (catalog_type or "polygon").lower()
+
+
+def _close_ring(ring: List[List[float]]) -> List[List[float]]:
+    if len(ring) >= 3 and ring[0] != ring[-1]:
+        return ring + [ring[0]]
+    return ring
+
+
+def _polygon_exterior_lines(coords: Sequence) -> List[List[List[float]]]:
+    """Anillos exteriores de polígono como LineString (export SHP tipo línea)."""
+    lines: List[List[List[float]]] = []
+    if not coords:
+        return lines
+    exterior = _xy_coords(coords[0] if coords else [])
+    if len(exterior) >= 2:
+        lines.append(exterior)
+    return lines
 
 
 def _shp_shape_type(geom_type: Optional[str]) -> int:
@@ -384,7 +569,8 @@ def build_shp_zip(
     base_name: str,
     geom_type: Optional[str] = None,
 ) -> bytes:
-    shape_type = _shp_shape_type(geom_type)
+    effective_type = _infer_export_geom_type(rows, geom_type)
+    shape_type = _shp_shape_type(effective_type)
     safe_base = re.sub(r"[^\w\-.]+", "_", base_name)[:80] or "atlas_export"
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -425,7 +611,15 @@ def build_shp_zip(
                     w.line([line])
                     written += 1
                 elif gtype == "Polygon" and coords:
-                    rings = [_xy_coords(ring) for ring in coords if ring]
+                    if effective_type == "line":
+                        for line in _polygon_exterior_lines(coords):
+                            if len(line) < 2:
+                                continue
+                            w.record(*rec)
+                            w.line([line])
+                            written += 1
+                        continue
+                    rings = [_close_ring(_xy_coords(ring)) for ring in coords if ring]
                     rings = [ring for ring in rings if len(ring) >= 3]
                     if not rings:
                         continue
@@ -453,9 +647,13 @@ def export_layer(conn, layer_id: str, fmt: str, cve: str, nom_mun: str):
     cfg = layer_config(layer_key)
     if not cfg:
         raise ValueError("UNKNOWN_LAYER")
-    cve = norm_cve_mun(cve)
-    if not cve:
-        raise ValueError("MISSING_PARAMS")
+    apply_mun_filter = layer_uses_mun_filter(cfg)
+    if apply_mun_filter:
+        cve = norm_cve_mun(cve)
+        if not cve:
+            raise ValueError("MISSING_PARAMS")
+    else:
+        cve = norm_cve_mun(cve) or "estatal"
     if fmt not in ("kml", "shp"):
         raise ValueError("INVALID_FORMAT")
 
@@ -467,21 +665,25 @@ def export_layer(conn, layer_id: str, fmt: str, cve: str, nom_mun: str):
     if not cols:
         raise ValueError("NO_COLUMNS")
 
-    with_cvegeo = layer_uses_cvegeo_filter(conn, cfg)
-    count_sql = build_count_sql(cfg, with_cvegeo, geom_col)
-    sql = build_select_sql(cfg, cols, with_cvegeo, geom_col)
+    with_cvegeo = layer_uses_cvegeo_filter(conn, cfg) if apply_mun_filter else False
+    count_sql = build_count_sql(cfg, with_cvegeo, geom_col, apply_mun_filter)
+    sql = build_select_sql(cfg, cols, with_cvegeo, geom_col, apply_mun_filter)
+    sql_params = {"cve": cve} if apply_mun_filter else {}
 
     with conn.cursor() as cur:
-        cur.execute(count_sql, {"cve": cve})
+        cur.execute(count_sql, sql_params)
         n = int(cur.fetchone()["n"] or 0)
         if n == 0:
             raise ValueError("NO_FEATURES")
-        cur.execute(sql, {"cve": cve})
+        cur.execute(sql, sql_params)
         rows = cur.fetchall()
 
     slug_layer = re.sub(r"[^a-z0-9]+", "_", layer_key)
-    slug_mun = re.sub(r"[^a-z0-9]+", "_", (nom_mun or f"mun_{cve}").lower())
-    base = f"atlas_{slug_layer}_{cve}_{slug_mun}"
+    if apply_mun_filter:
+        slug_mun = re.sub(r"[^a-z0-9]+", "_", (nom_mun or f"mun_{cve}").lower())
+        base = f"atlas_{slug_layer}_{cve}_{slug_mun}"
+    else:
+        base = f"atlas_{slug_layer}_estatal"
 
     if fmt == "kml":
         data = stream_kml(rows, cfg.get("label", layer_key), cols, cve, nom_mun or None)

@@ -19,197 +19,24 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from tables import SCHEMA, T_C_INV, T_CLUES, T_DENUE, T_ITER, T_LOC_PUNTO, qualified
 from utils import norm_cve_mun, quote_ident
+from visor_analysis_loader import inv_campos_analisis, iter_campos_analisis
+from visor_catalog_loader import merge_capas_analisis
 from visor_tabular import list_clues_detail_rows, list_denue_detail_rows
 
 # ---------------------------------------------------------------------------
-# Catálogo de capas habilitadas para análisis espacial (extensible).
+# Catálogo de capas habilitadas para análisis espacial (data-driven).
+# INV/ITER: config/visor/analysis_catalog.json
+# DENUE/CLUES: config/visor/catalog.json (capabilities.spatial_analysis)
 # ---------------------------------------------------------------------------
-CAPAS_ANALISIS: Dict[str, Dict[str, Any]] = {
-    "c_inv": {
-        "id": "c_inv",
-        "tabla": T_C_INV,
-        "etiqueta": "Inventario Nacional de Vivienda (INV) 2020",
-        "descripcion": "Manzanas INV 2020 (atlas.c_inv)",
-        "geom_column": "the_geom",
-        "srid_almacenamiento": 900913,
-        "grupo": "censales",
-        "modo": "agregacion",
-    },
-    "iter": {
-        "id": "iter",
-        "tabla": T_ITER,
-        "etiqueta": "ITER 2020 — Localidades",
-        "descripcion": "Indicadores ITER por localidad (geometría en atlas.c_loc_punto)",
-        "geom_column": "the_geom",
-        "geom_tabla": T_LOC_PUNTO,
-        "join_column": "cvegeo",
-        "srid_almacenamiento": 900913,
-        "grupo": "censales",
-        "modo": "agregacion",
-    },
-}
-
-# DENUE (atlas.c_denue) — mismos códigos SCIAN que js/denueLayers.js
-_DENUE_CAPAS_SPECS: List[Dict[str, Any]] = [
-    {"id": "denue_rastros", "etiqueta": "Rastros", "codigo_act": [311611]},
-    {"id": "denue_gasolinerias", "etiqueta": "Gasolinerías", "codigo_act": [468411]},
-    {"id": "denue_gaseras", "etiqueta": "Gaseras", "codigo_act": [468412]},
-    {
-        "id": "denue_escuelas",
-        "etiqueta": "Escuelas",
-        "codigo_act": [
-            611112, 611122, 611132, 611142, 611152, 611162, 611172, 611182,
-            611212, 611312, 611422, 611432, 611512, 611612, 611622, 611632,
-        ],
-    },
-    {"id": "denue_hospitales", "etiqueta": "Hospitales (DENUE)", "codigo_act": [622112]},
-    {"id": "denue_cementerios", "etiqueta": "Cementerios", "codigo_act": [812322]},
-    {"id": "denue_iglesias", "etiqueta": "Iglesias/Templos", "codigo_act": [813210]},
-    {"id": "denue_museos", "etiqueta": "Museos", "codigo_act": [712112]},
-]
-
-for _denue in _DENUE_CAPAS_SPECS:
-    CAPAS_ANALISIS[_denue["id"]] = {
-        "id": _denue["id"],
-        "tabla": T_DENUE,
-        "etiqueta": _denue["etiqueta"],
-        "descripcion": f"DENUE — {_denue['etiqueta']}",
-        "geom_column": "the_geom",
-        "modo": "conteo",
-        "grupo": "denue",
-        "codigo_act": _denue["codigo_act"],
-    }
-
-CAPAS_ANALISIS["clues"] = {
-    "id": "clues",
-    "tabla": T_CLUES,
-    "etiqueta": "Establecimientos de salud",
-    "descripcion": "Establecimientos de salud (atlas.c_clues)",
-    "geom_column": "the_geom",
-    "modo": "conteo",
-    "grupo": "salud",
-}
+CAPAS_ANALISIS: Dict[str, Dict[str, Any]] = merge_capas_analisis()
 
 # Campos permitidos para análisis espacial sobre INV 2020 (población → vivienda).
-INV_CAMPOS_ANALISIS: List[Dict[str, str]] = [
-    {"columna": "pobtot", "etiqueta": "Población total", "agregacion": "sum"},
-    {"columna": "pobfem", "etiqueta": "Población femenina", "agregacion": "sum"},
-    {"columna": "pobmas", "etiqueta": "Población masculina", "agregacion": "sum"},
-    {"columna": "pob0_14", "etiqueta": "Población de 0 a 14 años", "agregacion": "sum"},
-    {"columna": "p15a29a", "etiqueta": "Población de 15 a 29 años", "agregacion": "sum"},
-    {"columna": "p30a59a", "etiqueta": "Población de 30 a 59 años", "agregacion": "sum"},
-    {"columna": "p_60ymas", "etiqueta": "Población de 60 años y más", "agregacion": "sum"},
-    {"columna": "p_cd_t", "etiqueta": "Población con discapacidad", "agregacion": "sum"},
-    {"columna": "vivtot", "etiqueta": "Total de viviendas", "agregacion": "sum"},
-    {"columna": "vivpar", "etiqueta": "Total de viviendas particulares", "agregacion": "sum"},
-    {"columna": "tvipahab", "etiqueta": "Total de viviendas particulares habitadas", "agregacion": "sum"},
-    {"columna": "vivnohab", "etiqueta": "Viviendas particulares no habitadas", "agregacion": "sum"},
-    {
-        "columna": "v3masocu",
-        "etiqueta": "Viviendas particulares habitadas con 3 o más ocupantes por cuarto",
-        "agregacion": "sum",
-    },
-    {
-        "columna": "vph_pidt",
-        "etiqueta": "Viviendas particulares habitadas con piso de material diferente de tierra",
-        "agregacion": "sum",
-    },
-    {
-        "columna": "vph_c_el",
-        "etiqueta": "Viviendas particulares habitadas que disponen de energía eléctrica",
-        "agregacion": "sum",
-    },
-    {
-        "columna": "vph_exsa",
-        "etiqueta": "Viviendas particulares habitadas que disponen de excusado o sanitario",
-        "agregacion": "sum",
-    },
-    {
-        "columna": "vph_dren",
-        "etiqueta": "Viviendas particulares habitadas que disponen de drenaje",
-        "agregacion": "sum",
-    },
-]
+INV_CAMPOS_ANALISIS: List[Dict[str, str]] = inv_campos_analisis()
 
 _INV_CAMPOS_MAP: Dict[str, Dict[str, str]] = {c["columna"]: c for c in INV_CAMPOS_ANALISIS}
 
 # Campos ITER 2020 (atlas.iter, geometría vía atlas.c_loc_punto.cvegeo).
-ITER_CAMPOS_ANALISIS: List[Dict[str, str]] = [
-    {"columna": "pobtot", "etiqueta": "Población total", "agregacion": "sum"},
-    {"columna": "pobfem", "etiqueta": "Población femenina", "agregacion": "sum"},
-    {"columna": "pobmas", "etiqueta": "Población masculina", "agregacion": "sum"},
-    {
-        "columna": "p3ym_hli",
-        "etiqueta": "Población de 3 años y más que habla alguna lengua indígena",
-        "agregacion": "sum",
-    },
-    {
-        "columna": "p3hlinhe",
-        "etiqueta": "Población de 3 años y más que habla alguna lengua indígena y no habla español",
-        "agregacion": "sum",
-    },
-    {"columna": "pcon_disc", "etiqueta": "Población con discapacidad", "agregacion": "sum"},
-    {
-        "columna": "psind_lim",
-        "etiqueta": "Población sin discapacidad, limitación, problema o condición mental",
-        "agregacion": "sum",
-    },
-    {
-        "columna": "pea",
-        "etiqueta": "Población de 12 años y más económicamente activa",
-        "agregacion": "sum",
-    },
-    {
-        "columna": "pea_f",
-        "etiqueta": "Población femenina de 12 años y más económicamente activa",
-        "agregacion": "sum",
-    },
-    {
-        "columna": "pea_m",
-        "etiqueta": "Población masculina de 12 años y más económicamente activa",
-        "agregacion": "sum",
-    },
-    {
-        "columna": "psinder",
-        "etiqueta": "Población sin afiliación a servicios de salud",
-        "agregacion": "sum",
-    },
-    {
-        "columna": "pder_ss",
-        "etiqueta": "Población afiliada a servicios de salud",
-        "agregacion": "sum",
-    },
-    {"columna": "vivtot", "etiqueta": "Total de viviendas", "agregacion": "sum"},
-    {"columna": "tvivhab", "etiqueta": "Total de viviendas habitadas", "agregacion": "sum"},
-    {"columna": "tvivpar", "etiqueta": "Total de viviendas particulares", "agregacion": "sum"},
-    {"columna": "vivpar_hab", "etiqueta": "Viviendas particulares habitadas", "agregacion": "sum"},
-    {"columna": "vivpar_des", "etiqueta": "Viviendas particulares deshabitadas", "agregacion": "sum"},
-    {
-        "columna": "vph_pisodt",
-        "etiqueta": "Viviendas particulares habitadas con piso de material diferente de tierra",
-        "agregacion": "sum",
-    },
-    {
-        "columna": "vph_pisoti",
-        "etiqueta": "Viviendas particulares habitadas con piso de tierra",
-        "agregacion": "sum",
-    },
-    {
-        "columna": "vph_c_elec",
-        "etiqueta": "Viviendas particulares habitadas que disponen de energía eléctrica",
-        "agregacion": "sum",
-    },
-    {
-        "columna": "vph_aguadv",
-        "etiqueta": "Viviendas particulares habitadas que disponen de agua entubada en el ámbito de la vivienda",
-        "agregacion": "sum",
-    },
-    {
-        "columna": "vph_drenaj",
-        "etiqueta": "Viviendas particulares habitadas que disponen de drenaje",
-        "agregacion": "sum",
-    },
-]
+ITER_CAMPOS_ANALISIS: List[Dict[str, str]] = iter_campos_analisis()
 
 _ITER_CAMPOS_MAP: Dict[str, Dict[str, str]] = {c["columna"]: c for c in ITER_CAMPOS_ANALISIS}
 

@@ -50,6 +50,8 @@ def get_settings():
         "database_url": db_url,
         "database_name": db_name or database_name_from_url(db_url),
         "schema": os.getenv("ATLAS_SCHEMA", "atlas").strip() or "atlas",
+        "jwt_secret": os.getenv("JWT_SECRET", "").strip(),
+        "jwt_expire_hours": int(os.getenv("JWT_EXPIRE_HOURS", "8") or "8"),
         "cors_origins": [
             o.strip()
             for o in os.getenv("CORS_ORIGINS", "").split(",")

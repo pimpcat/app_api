@@ -31,7 +31,7 @@ from vistas_tab_municipal import (
 )
 from vistas_nacional import ent_key_to_int
 from visor_export import export_error_message, export_layer
-from visor_layers import layer_catalog
+from visor_layers import layer_catalog, visor_catalog_payload
 from visor_tabular import (
     build_tabular_xlsx,
     fetch_tabular_data,
@@ -40,6 +40,7 @@ from visor_tabular import (
 )
 from visor_buffer import buffer_geometry_geojson, fetch_feature_geometry_geojson, fetch_feature_outline_geojson
 from geocoder import buscar_lugares, fetch_lugar_geometria
+from visor_search_loader import search_config_for_api
 from spatial_analysis import (
     detectar_capas_intersectantes,
     ejecutar_analisis_espacial,
@@ -249,9 +250,9 @@ def buscar(
     ),
 ):
     """
-    Geocoder local: localidades puntuales (c_loc_punto), localidades con amanzanamiento (c_l)
-    y colonias (c_col_ase) dentro del municipio.
-    Sin ``cve_mun`` válido también incluye municipios (c_mun) a nivel estatal.
+    Geocoder local data-driven: fuentes declaradas en catalog.json (bloque search).
+    Con ``cve_mun`` válido aplica filtro municipal según cada fuente.
+    Sin ``cve_mun`` incluye fuentes de ámbito estatal (p. ej. municipios).
     """
     term = q.strip()
     cve = norm_cve_mun(cve_mun)
@@ -1399,6 +1400,34 @@ def visor_feature_outline(
 def visor_layers_list():
     cat = layer_catalog()
     return {"ok": True, "layers": [{"id": k, **v} for k, v in cat.items()]}
+
+
+@router.get("/visor/catalog")
+@router.get("/api/visor/catalog")
+def visor_catalog():
+    """Catálogo data-driven del visor geográfico (panel, identify, metadatos)."""
+    try:
+        payload = visor_catalog_payload()
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"ok": False, "error": "CATALOG_LOAD_FAILED", "message": str(exc)},
+        ) from exc
+    return {"ok": True, **payload}
+
+
+@router.get("/visor/search")
+@router.get("/api/visor/search")
+def visor_search_config():
+    """Fuentes del buscador geográfico (derivadas del catálogo)."""
+    try:
+        cfg = search_config_for_api()
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"ok": False, "error": "CATALOG_LOAD_FAILED", "message": str(exc)},
+        ) from exc
+    return {"ok": True, **cfg}
 
 
 def _visor_tabular_http_error(exc: Exception) -> HTTPException:

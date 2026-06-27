@@ -38,6 +38,15 @@ try:
 except Exception as exc:
     logger.warning("Módulo ruteo no disponible (portal sigue operativo): %s", exc)
 
+try:
+    from routers.admin_auth import router as admin_auth_router
+    from routers.visor_admin import router as visor_admin_router
+
+    app.include_router(admin_auth_router)
+    app.include_router(visor_admin_router)
+except Exception as exc:
+    logger.warning("Módulo admin visor no disponible: %s", exc)
+
 
 @app.get("/")
 def read_root():

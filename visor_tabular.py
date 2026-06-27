@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from column_resolver import resolve_column
 from tables import SCHEMA, T_CLUES, T_DENUE, T_LOC_PUNTO, qualified
 from utils import mun_where_sql, norm_cve_mun, quote_ident
+from visor_catalog_loader import load_visor_catalog_raw, ordered_layer_ids_from_raw
 from visor_layers import denue_codigos_for_layer, layer_config
 
 logger = logging.getLogger(__name__)
@@ -97,33 +98,60 @@ _DENUE_TABULAR_LAYER_IDS: Sequence[str] = (
     "denue_iglesias",
 )
 
-_TABULAR_LAYER_ORDER: Sequence[str] = (
-    "locspunto",
-    "clues",
-    *_DENUE_TABULAR_LAYER_IDS,
-)
-
-_TABULAR_LAYERS = frozenset(_TABULAR_LAYER_ORDER)
+_TABULAR_PRESETS = frozenset({"locspunto", "clues", "denue"})
 
 
-def tabular_error_message(code: str) -> str:
-    return TABULAR_ERRORS.get(code, code)
+def _raw_layer_entry(layer_id: str) -> Optional[Dict[str, Any]]:
+    key = (layer_id or "").strip().lower()
+    layers = load_visor_catalog_raw().get("layers") or {}
+    entry = layers.get(key)
+    return entry if isinstance(entry, dict) else None
+
+
+def _tabular_block(layer_id: str) -> Dict[str, Any]:
+    entry = _raw_layer_entry(layer_id) or {}
+    block = entry.get("tabular")
+    return block if isinstance(block, dict) else {}
+
+
+def _tabular_preset(layer_id: str) -> Optional[str]:
+    block = _tabular_block(layer_id)
+    preset = block.get("preset")
+    if preset:
+        return str(preset).strip().lower()
+    key = (layer_id or "").strip().lower()
+    if key == "locspunto":
+        return "locspunto"
+    if key == "clues":
+        return "clues"
+    if key in _DENUE_TABULAR_LAYER_IDS:
+        return "denue"
+    return None
+
+
+def _layer_has_tabular_capability(layer_id: str) -> bool:
+    entry = _raw_layer_entry(layer_id)
+    if not entry:
+        return False
+    if (entry.get("capabilities") or {}).get("tabular"):
+        return True
+    return _tabular_preset(layer_id) is not None
 
 
 def list_tabular_layers() -> List[Dict[str, Any]]:
-    """Capas habilitadas para el selector de consulta tabular."""
+    """Capas habilitadas para el selector de consulta tabular (desde catálogo)."""
     out: List[Dict[str, Any]] = []
-    for layer_id in _TABULAR_LAYER_ORDER:
-        if layer_id not in _TABULAR_LAYERS:
+    for layer_id in ordered_layer_ids_from_raw():
+        if not _layer_has_tabular_capability(layer_id):
             continue
-        cfg = layer_config(layer_id)
-        if not cfg:
-            continue
+        entry = _raw_layer_entry(layer_id) or {}
+        data = entry.get("data") or {}
+        table = data.get("table") or T_DENUE
         out.append(
             {
                 "id": layer_id,
-                "label": cfg.get("label") or layer_id,
-                "table": cfg.get("table") or T_DENUE,
+                "label": entry.get("label") or layer_id,
+                "table": table,
             }
         )
     return out
@@ -327,6 +355,90 @@ def list_denue_detail_rows(
     }
 
 
+def tabular_error_message(code: str) -> str:
+    return TABULAR_ERRORS.get(code, code)
+
+
+def _column_specs_from_catalog(layer_id: str) -> Optional[Sequence[Tuple[str, Sequence[str], str]]]:
+    block = _tabular_block(layer_id)
+    columns = block.get("columns")
+    if not isinstance(columns, list) or not columns:
+        return None
+    specs: List[Tuple[str, Sequence[str], str]] = []
+    for col in columns:
+        if not isinstance(col, dict):
+            continue
+        field = str(col.get("field") or "").strip()
+        if not field:
+            continue
+        candidates = col.get("candidates") or [field]
+        label = str(col.get("label") or field)
+        specs.append((field, tuple(str(c) for c in candidates), label))
+    return specs or None
+
+
+def _resolve_columns_for_layer(conn, layer_id: str, table: str) -> List[Dict[str, str]]:
+    specs = _column_specs_from_catalog(layer_id)
+    if specs:
+        return _resolve_field_specs(conn, table, specs)
+    preset = _tabular_preset(layer_id)
+    if preset == "locspunto":
+        return _resolve_locspunto_columns(conn)
+    if preset == "clues":
+        return _resolve_clues_columns(conn)
+    if preset == "denue":
+        return _resolve_denue_columns(conn)
+    raise ValueError("NO_COLUMNS")
+
+
+def fetch_generic_tabular_table(
+    conn,
+    layer_id: str,
+    cve_mun: str,
+    *,
+    table: str,
+    mun_filter_cvegeo: bool = False,
+) -> Dict[str, Any]:
+    """Consulta tabular genérica con columnas del catálogo o preset legacy."""
+    cve = norm_cve_mun(cve_mun)
+    if not cve:
+        raise ValueError("MISSING_CVE_MUN")
+
+    columns = _resolve_columns_for_layer(conn, layer_id, table)
+    alias = "pt"
+    select_parts = _build_select_parts(columns, alias)
+    where_sql = mun_where_sql(alias, with_cvegeo=mun_filter_cvegeo)
+    order_col = columns[0]["sql"]
+    order_by = f"{alias}.{quote_ident(order_col)} ASC"
+
+    rows, truncated = _execute_detail_query(
+        conn,
+        columns=columns,
+        select_parts=select_parts,
+        from_sql=f"{qualified(table)} {alias}",
+        where_sql=where_sql,
+        params={"cve": cve},
+        order_by=order_by,
+    )
+    if not rows:
+        raise ValueError("NO_ROWS")
+
+    entry = _raw_layer_entry(layer_id) or {}
+    nom_mun = _fetch_nom_mun(conn, cve)
+    return {
+        "layer": layer_id,
+        "layer_label": entry.get("label") or layer_id,
+        "table": table,
+        "cve_mun": cve,
+        "nom_mun": nom_mun,
+        "total_registros": len(rows),
+        "summary_label": f"Registros en el municipio",
+        "columns": _columns_with_numero(columns),
+        "rows": _rows_with_numero(rows),
+        "filas_truncadas": truncated,
+    }
+
+
 def _resolve_locspunto_columns(conn) -> List[Dict[str, str]]:
     resolved: List[Dict[str, str]] = []
     for key, candidates, label in _LOCSPUNTO_FIELD_SPECS:
@@ -498,13 +610,29 @@ def fetch_denue_table(conn, layer_id: str, cve_mun: str) -> Dict[str, Any]:
 
 def fetch_tabular_data(conn, layer_id: str, cve_mun: str) -> Dict[str, Any]:
     key = (layer_id or "").strip().lower()
-    if key not in _TABULAR_LAYERS:
+    if not _layer_has_tabular_capability(key):
         raise ValueError("UNKNOWN_LAYER")
-    if key == "locspunto":
+
+    preset = _tabular_preset(key)
+    block = _tabular_block(key)
+    if block.get("columns") or (preset and preset not in _TABULAR_PRESETS):
+        entry = _raw_layer_entry(key) or {}
+        data = entry.get("data") or {}
+        table = str(data.get("table") or T_DENUE)
+        mun_cvegeo = data.get("mun_filter_cvegeo") is not False and key == "locspunto"
+        return fetch_generic_tabular_table(
+            conn,
+            key,
+            cve_mun,
+            table=table,
+            mun_filter_cvegeo=mun_cvegeo,
+        )
+
+    if preset == "locspunto" or key == "locspunto":
         return fetch_locspunto_table(conn, cve_mun)
-    if key == "clues":
+    if preset == "clues" or key == "clues":
         return fetch_clues_table(conn, cve_mun)
-    if key in _DENUE_TABULAR_LAYER_IDS:
+    if preset == "denue" or key in _DENUE_TABULAR_LAYER_IDS:
         return fetch_denue_table(conn, key, cve_mun)
     raise ValueError("UNKNOWN_LAYER")
 

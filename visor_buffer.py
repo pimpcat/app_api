@@ -9,6 +9,7 @@ from tables import SCHEMA, T_RNC, qualified
 from utils import quote_ident
 from visor_export import layer_geom_column
 from visor_layers import layer_config
+from visor_catalog_loader import get_layer_identify_field_names
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,76 @@ def _resolve_gid_column(conn, cfg: Dict[str, Any]) -> Optional[str]:
     return resolve_column(conn, SCHEMA, table, ("gid", "GID", "ogc_fid", "OGC_FID"))
 
 
+def _table_for_column_resolve(cfg: Dict[str, Any]) -> Optional[str]:
+    if cfg.get("from_sql"):
+        return cfg.get("gid_table") or T_RNC
+    table = cfg.get("table") or ""
+    return str(table).strip() or None
+
+
+def _fetch_identify_properties(
+    conn,
+    cfg: Dict[str, Any],
+    layer_id: str,
+    gid: str,
+    gid_col: str,
+) -> Dict[str, Any]:
+    """Atributos configurados en identify.fields desde PostGIS (tiles MVT suelen traer solo gid)."""
+    field_names = get_layer_identify_field_names(layer_id)
+    if not field_names:
+        return {"gid": gid}
+
+    table = _table_for_column_resolve(cfg)
+    if not table:
+        return {"gid": gid}
+
+    select_parts: List[str] = []
+    aliases: List[str] = []
+    seen_cols: set[str] = set()
+    for name in field_names:
+        resolved = resolve_column(conn, SCHEMA, table, (name, name.upper(), name.lower()))
+        if not resolved:
+            continue
+        col_key = resolved.lower()
+        if col_key in seen_cols:
+            continue
+        seen_cols.add(col_key)
+        alias = "gid" if col_key == gid_col.lower() else name
+        aliases.append(alias)
+        select_parts.append(f"TRIM({quote_ident(resolved)}::text) AS {quote_ident(alias)}")
+
+    if not select_parts:
+        return {"gid": gid}
+
+    q_gid = quote_ident(gid_col)
+    from_part = _layer_from_part(cfg)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT {", ".join(select_parts)}
+              FROM {from_part}
+             WHERE TRIM({q_gid}::text) = TRIM(%(gid)s)
+             LIMIT 1
+            """,
+            {"gid": gid},
+        )
+        row = cur.fetchone()
+
+    if not row:
+        return {"gid": gid}
+
+    props: Dict[str, Any] = {}
+    for alias in aliases:
+        val = row.get(alias)
+        if val is None and alias != "gid":
+            val = row.get(alias.lower()) or row.get(alias.upper())
+        if val is not None and str(val).strip() != "":
+            props[alias] = str(val).strip()
+    props.setdefault("gid", gid)
+    return props
+
+
 def _geom4326_expr(geom_col: str) -> str:
     q = quote_ident(geom_col)
     return f"ST_Force2D(ST_Transform(ST_MakeValid({q}), 4326))"
@@ -126,7 +197,9 @@ def fetch_feature_geometry_geojson(
         raise ValueError("ELEMENTO_NO_ENCONTRADO")
 
     geometry = json.loads(geom_json)
-    props: Dict[str, Any] = dict(properties or {})
+    props = _fetch_identify_properties(conn, cfg, layer_id, gid, gid_col)
+    if properties:
+        props = {**props, **properties}
     props.setdefault("gid", gid)
     return {"type": "Feature", "properties": props, "geometry": geometry}
 

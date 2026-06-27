@@ -5,3 +5,7 @@ python-dotenv
 pandas
 openpyxl
 pyshp==2.3.1
+python-jose[cryptography]
+bcrypt>=4.0,<5
+python-multipart>=0.0.9
+PyYAML>=6.0,<7
