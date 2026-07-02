@@ -43,6 +43,21 @@ def _pg_connection_string() -> str:
     return "PG:" + " ".join(parts)
 
 
+def _safe_zip_extract(zf: zipfile.ZipFile, dest: Path) -> None:
+    """Extrae ZIP rechazando rutas con .. (zip slip)."""
+    dest_root = dest.resolve()
+    dest_root.mkdir(parents=True, exist_ok=True)
+    for member in zf.namelist():
+        if not member or member.endswith("/"):
+            continue
+        target = (dest_root / member).resolve()
+        try:
+            target.relative_to(dest_root)
+        except ValueError as exc:
+            raise ValueError("ZIP_PATH_TRAVERSAL") from exc
+    zf.extractall(dest_root)
+
+
 def _extract_shp_dir(archive_path: Path) -> Path:
     if archive_path.suffix.lower() == ".zip":
         dest = archive_path.parent / "shp_extract"
@@ -50,7 +65,7 @@ def _extract_shp_dir(archive_path: Path) -> Path:
             shutil.rmtree(dest)
         dest.mkdir(parents=True)
         with zipfile.ZipFile(archive_path, "r") as zf:
-            zf.extractall(dest)
+            _safe_zip_extract(zf, dest)
         shp_files = list(dest.rglob("*.shp"))
         if not shp_files:
             raise ValueError("ZIP_WITHOUT_SHP")

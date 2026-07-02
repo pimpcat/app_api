@@ -38,9 +38,11 @@ from visor_tabular import (
     list_tabular_layers,
     tabular_error_message,
 )
+from visor_cluster import cluster_error_message, fetch_layer_points_geojson
 from visor_buffer import buffer_geometry_geojson, fetch_feature_geometry_geojson, fetch_feature_outline_geojson
 from geocoder import buscar_lugares, fetch_lugar_geometria
 from visor_search_loader import search_config_for_api
+from visor_polygon_labels import polygon_label_geojson
 from spatial_analysis import (
     detectar_capas_intersectantes,
     ejecutar_analisis_espacial,
@@ -440,6 +442,30 @@ def locs_atlas_labels(cve_mun: str = Query(...)):
         "count": len(features),
         "featureCollection": {"type": "FeatureCollection", "features": features},
     }
+
+
+@router.get("/visor/polygon-labels/{layer_id}")
+@router.get("/api/visor/polygon-labels/{layer_id}")
+def visor_polygon_labels(
+    layer_id: str,
+    cve_mun: str = Query("", description="Clave municipal (3 dígitos); omitir en vista estatal"),
+    state_wide: bool = Query(False, description="Etiquetas de toda la entidad sin filtro municipal"),
+):
+    """Un punto de etiqueta por polígono (catálogo, source=centroid)."""
+    try:
+        payload = polygon_label_geojson(
+            layer_id,
+            cve_mun=cve_mun or None,
+            state_wide=state_wide,
+        )
+    except ValueError as exc:
+        code = str(exc)
+        if code == "LAYER_NOT_FOUND":
+            raise HTTPException(status_code=404, detail={"ok": False, "error": code}) from exc
+        if code in ("NOT_CENTROID_LABELS", "NOT_POLYGON_LAYER", "LABEL_FIELD_REQUIRED", "TABLE_REQUIRED"):
+            raise HTTPException(status_code=400, detail={"ok": False, "error": code}) from exc
+        raise HTTPException(status_code=400, detail={"ok": False, "error": "BAD_REQUEST", "message": code}) from exc
+    return payload
 
 
 _geo_contexto_bulk_cache: Optional[Dict[str, Dict[str, Any]]] = None
@@ -1513,6 +1539,54 @@ def visor_tabular_export(
             "Cache-Control": "no-store",
         },
     )
+
+
+def _visor_cluster_http_error(exc: Exception) -> HTTPException:
+    raw = str(exc)
+    code = raw if raw in ("UNKNOWN_LAYER", "MISSING_CVE_MUN", "NOT_POINT_LAYER", "CLUSTER_DISABLED", "NO_FEATURES") else "ERROR"
+    if code != "ERROR":
+        return HTTPException(
+            status_code=400 if code in ("MISSING_CVE_MUN", "NOT_POINT_LAYER", "CLUSTER_DISABLED", "NO_FEATURES") else 404,
+            detail={"ok": False, "error": code, "message": cluster_error_message(code)},
+        )
+    return HTTPException(status_code=500, detail={"ok": False, "message": raw})
+
+
+@router.get("/visor/layers/{layer_id}/points")
+@router.get("/api/visor/layers/{layer_id}/points")
+def visor_layer_points_geojson(
+    layer_id: str,
+    cve_mun: Optional[str] = Query(None),
+    scope: Optional[str] = Query(None),
+):
+    """Puntos GeoJSON para capas con clusters (municipio o vista estatal del visor)."""
+    scope_key = (scope or "").strip().lower()
+    state_wide = scope_key in ("estatal", "state", "statewide")
+    cve = (cve_mun or "").strip()
+    if not state_wide and not cve:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "ok": False,
+                "error": "MISSING_CVE_MUN",
+                "message": cluster_error_message("MISSING_CVE_MUN"),
+            },
+        )
+    try:
+        with get_db() as conn:
+            fc = fetch_layer_points_geojson(
+                conn,
+                layer_id.strip().lower(),
+                cve,
+                state_wide=state_wide,
+            )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise _visor_cluster_http_error(exc) from exc
+    except Exception as exc:
+        raise _visor_cluster_http_error(exc) from exc
+    return {"ok": True, "featureCollection": fc}
 
 
 @router.get("/visor/export")

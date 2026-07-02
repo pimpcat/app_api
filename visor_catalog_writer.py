@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from visor_catalog_loader import catalog_path, load_visor_catalog_raw
+from visor_catalog_loader import catalog_path, load_visor_catalog_raw, invalidate_visor_catalog_cache as clear_catalog_cache
 
 
 def _catalog_file() -> Path:
@@ -23,7 +23,13 @@ def load_catalog_mutable() -> Dict[str, Any]:
 
 
 def invalidate_visor_catalog_cache() -> None:
-    load_visor_catalog_raw.cache_clear()
+    clear_catalog_cache()
+    try:
+        from spatial_analysis import refresh_capas_analisis
+
+        refresh_capas_analisis()
+    except ImportError:
+        pass
 
 
 def _write_backup(path: Path) -> None:
@@ -46,6 +52,12 @@ def save_catalog(data: Dict[str, Any]) -> Path:
         fh.write("\n")
     os.replace(tmp, path)
     invalidate_visor_catalog_cache()
+    try:
+        from visor_search_loader import clear_search_catalog_cache
+
+        clear_search_catalog_cache()
+    except ImportError:
+        pass
     return path
 
 
@@ -77,6 +89,90 @@ def catalog_layer_ids(catalog: Optional[Dict[str, Any]] = None) -> set[str]:
 def _slug_layer_id(value: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "_", (value or "").strip().lower()).strip("_")
     return s[:64] or "capa"
+
+
+def slug_group_id(value: str) -> str:
+    s = re.sub(r"[^a-z0-9_]+", "_", (value or "").strip().lower()).strip("_")
+    return s[:64] or "grupo"
+
+
+def catalog_group_ids(catalog: Optional[Dict[str, Any]] = None) -> set[str]:
+    raw = catalog or load_visor_catalog_raw()
+    groups = raw.get("groups") or []
+    if not isinstance(groups, list):
+        return set()
+    return {str(g.get("id")).strip() for g in groups if isinstance(g, dict) and g.get("id")}
+
+
+def create_group_entry(
+    catalog: Dict[str, Any],
+    group_id: str,
+    label: str,
+) -> Tuple[Dict[str, Any], str]:
+    gid = slug_group_id(group_id)
+    if len(gid) < 2:
+        raise ValueError("INVALID_GROUP_ID")
+    if gid in catalog_group_ids(catalog):
+        raise ValueError(f"GROUP_EXISTS:{gid}")
+    groups = catalog.setdefault("groups", [])
+    if not isinstance(groups, list):
+        raise ValueError("INVALID_CATALOG: groups debe ser array")
+    clean_label = (label or "").strip()
+    if len(clean_label) < 2:
+        raise ValueError("INVALID_GROUP_LABEL")
+    entry: Dict[str, Any] = {
+        "id": gid,
+        "label": clean_label,
+        "layers": [],
+    }
+    groups.append(entry)
+    return catalog, gid
+
+
+def delete_group_entry(
+    catalog: Dict[str, Any],
+    group_id: str,
+) -> Tuple[Dict[str, Any], str, Optional[Dict[str, Any]]]:
+    gid = slug_group_id(group_id)
+    groups = catalog.get("groups") or []
+    if not isinstance(groups, list):
+        raise ValueError("INVALID_CATALOG: groups debe ser array")
+    target: Optional[Dict[str, Any]] = None
+    for grp in groups:
+        if isinstance(grp, dict) and grp.get("id") == gid:
+            target = grp
+            break
+    if target is None:
+        raise ValueError(f"GROUP_NOT_FOUND:{gid}")
+    layers = target.get("layers") or []
+    if layers:
+        raise ValueError(f"GROUP_NOT_EMPTY:{gid}:{len(layers)}")
+    catalog["groups"] = [g for g in groups if not (isinstance(g, dict) and g.get("id") == gid)]
+    return catalog, gid, target
+
+
+def update_group_label_entry(
+    catalog: Dict[str, Any],
+    group_id: str,
+    label: str,
+) -> Tuple[Dict[str, Any], str, Dict[str, Any]]:
+    gid = slug_group_id(group_id)
+    clean_label = (label or "").strip()
+    if len(clean_label) < 2:
+        raise ValueError("INVALID_GROUP_LABEL")
+    groups = catalog.get("groups") or []
+    if not isinstance(groups, list):
+        raise ValueError("INVALID_CATALOG: groups debe ser array")
+    target: Optional[Dict[str, Any]] = None
+    for grp in groups:
+        if isinstance(grp, dict) and grp.get("id") == gid:
+            target = grp
+            break
+    if target is None:
+        raise ValueError(f"GROUP_NOT_FOUND:{gid}")
+    before = dict(target)
+    target["label"] = clean_label
+    return catalog, gid, before
 
 
 def _overlay_key_from_layer_id(layer_id: str) -> str:

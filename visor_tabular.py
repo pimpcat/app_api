@@ -28,6 +28,7 @@ TABULAR_ERRORS = {
     "UNKNOWN_LAYER": "Capa no disponible para consulta tabular.",
     "MISSING_CVE_MUN": "Selecciona un municipio en el explorador.",
     "NO_ROWS": "No hay registros para este municipio en la capa seleccionada.",
+    "NO_COLUMNS": "No hay columnas configuradas para esta consulta tabular.",
     "EXPORT_FAILED": "No se pudo generar el archivo Excel.",
 }
 

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from visor_attribute_filter import parse_attribute_filter
 
 from tables import T_CLUES, T_DENUE, T_RNC, qualified
 
@@ -47,14 +48,28 @@ def _resolve_catalog_path() -> Path:
     raise FileNotFoundError(f"No se encontró catalog.json del visor. Rutas probadas: {tried}")
 
 
-@lru_cache
+_catalog_cache: Optional[Tuple[float, Dict[str, Any]]] = None
+
+
 def load_visor_catalog_raw() -> Dict[str, Any]:
+    """Lee catalog.json; invalida automáticamente si cambia mtime (varios workers Gunicorn)."""
+    global _catalog_cache
     path = _resolve_catalog_path()
+    mtime = path.stat().st_mtime_ns
+    if _catalog_cache is not None and _catalog_cache[0] == mtime:
+        return _catalog_cache[1]
     with path.open(encoding="utf-8") as fh:
         data = json.load(fh)
     if not isinstance(data, dict) or "layers" not in data:
         raise ValueError(f"Catálogo inválido en {path}: falta objeto 'layers'")
+    _catalog_cache = (mtime, data)
     return data
+
+
+def invalidate_visor_catalog_cache() -> None:
+    """Limpia caché en memoria (p. ej. tras guardar catalog.json)."""
+    global _catalog_cache
+    _catalog_cache = None
 
 
 def catalog_path() -> str:
@@ -170,6 +185,14 @@ def _layer_data_to_backend(layer_id: str, layer: Dict[str, Any]) -> Dict[str, An
     elif data.get("table"):
         out["table"] = data["table"]
 
+    attr_f = parse_attribute_filter(data)
+    if attr_f:
+        out["attribute_filter"] = attr_f
+
+    style = layer.get("style")
+    if isinstance(style, dict) and style:
+        out["style"] = dict(style)
+
     return out
 
 
@@ -235,8 +258,158 @@ def get_layer_identify_field_names(layer_id: str) -> List[str]:
     return names
 
 
+def _default_spatial_modo(geometry: str) -> str:
+    return "conteo" if (geometry or "").strip().lower() == "point" else "agregacion"
+
+
+def _catalog_layer_eligible_for_spatial_analysis(layer_id: str, entry: Dict[str, Any]) -> bool:
+    """
+    True si la capa debe entrar al motor de análisis espacial.
+
+    - DENUE / CLUES: legacy (solo capabilities.spatial_analysis).
+    - Capas Studio: requieren bloque spatial_analysis publicado por el wizard.
+    """
+    if not (entry.get("capabilities") or {}).get("spatial_analysis"):
+        return False
+
+    key = str(layer_id).strip().lower()
+    data = entry.get("data") or {}
+    table = str(data.get("table") or "").strip().lower()
+    filt = data.get("filter") or {}
+
+    if table == T_DENUE and filt.get("codigo_act"):
+        return True
+    if key == "clues" or table == T_CLUES:
+        return True
+
+    spatial = entry.get("spatial_analysis")
+    if not isinstance(spatial, dict) or not spatial:
+        return False
+
+    modo = str(spatial.get("modo") or "").strip().lower()
+    geometry = str(entry.get("geometry") or "polygon").strip().lower()
+    if not modo:
+        modo = _default_spatial_modo(geometry)
+
+    if modo == "agregacion":
+        sections = spatial.get("sections")
+        if isinstance(sections, list):
+            for section in sections:
+                if isinstance(section, dict) and section.get("campos"):
+                    return True
+        return False
+
+    if modo == "conteo":
+        return True
+
+    return False
+
+
+def _spatial_detail_columns_from_entry(entry: Dict[str, Any], spatial: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Columnas detalle: spatial_analysis.detail_columns o, si vacío, tabular.columns (data-driven)."""
+    out: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in spatial.get("detail_columns") or []:
+        if not isinstance(item, dict):
+            continue
+        col = str(item.get("columna") or item.get("column") or item.get("field") or "").strip().lower()
+        if not col or col in seen:
+            continue
+        seen.add(col)
+        label = str(item.get("etiqueta") or item.get("label") or col).strip() or col
+        out.append({"columna": col, "etiqueta": label})
+    if out or not spatial.get("detail_table"):
+        return out
+    tabular = entry.get("tabular") or {}
+    for item in tabular.get("columns") or []:
+        if not isinstance(item, dict):
+            continue
+        col = str(item.get("field") or item.get("columna") or item.get("column") or "").strip().lower()
+        if not col or col in seen:
+            continue
+        seen.add(col)
+        label = str(item.get("label") or item.get("etiqueta") or col).strip() or col
+        out.append({"columna": col, "etiqueta": label})
+    return out
+
+
+def _spatial_meta_from_catalog_entry(layer_id: str, entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Construye meta de CAPAS_ANALISIS desde una entrada de catalog.json."""
+    key = str(layer_id).strip().lower()
+    data = entry.get("data") or {}
+    spatial = entry.get("spatial_analysis") or {}
+    geometry = str(entry.get("geometry") or "polygon").strip().lower()
+    filt = data.get("filter") or {}
+    codigos = filt.get("codigo_act")
+    table = str(data.get("table") or "").strip().lower()
+
+    if table == T_DENUE and codigos:
+        meta: Dict[str, Any] = {
+            "id": key,
+            "tabla": data.get("table") or T_DENUE,
+            "etiqueta": entry.get("label") or key,
+            "descripcion": f"DENUE — {entry.get('label') or key}",
+            "geom_column": str(spatial.get("geom_column") or "the_geom"),
+            "modo": str(spatial.get("modo") or "conteo"),
+            "grupo": str(spatial.get("grupo") or "denue"),
+            "codigo_act": [int(c) for c in codigos],
+        }
+    elif key == "clues" or table == T_CLUES:
+        meta = {
+            "id": key if key == "clues" else key,
+            "tabla": data.get("table") or T_CLUES,
+            "etiqueta": entry.get("label") or "Establecimientos de salud",
+            "descripcion": entry.get("descripcion") or f"{entry.get('label') or key}",
+            "geom_column": str(spatial.get("geom_column") or "the_geom"),
+            "modo": str(spatial.get("modo") or "conteo"),
+            "grupo": str(spatial.get("grupo") or "salud"),
+        }
+    else:
+        grupo = str(spatial.get("grupo") or "tematicas")
+        meta = {
+            "id": key,
+            "tabla": data.get("table") or key,
+            "etiqueta": entry.get("label") or key,
+            "descripcion": entry.get("descripcion") or str(entry.get("label") or key),
+            "geom_column": str(spatial.get("geom_column") or "the_geom"),
+            "modo": str(spatial.get("modo") or _default_spatial_modo(geometry)),
+            "grupo": grupo,
+        }
+        if spatial.get("geom_tabla"):
+            meta["geom_tabla"] = str(spatial["geom_tabla"])
+        if spatial.get("join_column"):
+            meta["join_column"] = str(spatial["join_column"])
+
+    if isinstance(spatial.get("sections"), list) and spatial["sections"]:
+        meta["sections"] = spatial["sections"]
+    if spatial.get("detail_table"):
+        meta["detail_table"] = True
+    detail_cols = _spatial_detail_columns_from_entry(entry, spatial)
+    if detail_cols:
+        meta["detail_columns"] = detail_cols
+    ui = spatial.get("ui")
+    if isinstance(ui, dict) and ui:
+        meta["ui"] = ui
+
+    attr_f = parse_attribute_filter(data)
+    if attr_f:
+        meta["attribute_filter"] = attr_f
+
+    mun_f = data.get("mun_filter")
+    if mun_f is False:
+        meta["mun_filter"] = False
+    elif mun_f:
+        meta["mun_filter"] = mun_f
+    if data.get("mun_filter_cvegeo") is False:
+        meta["mun_filter_cvegeo"] = False
+    elif key == "clues" or table == T_CLUES or table == T_DENUE:
+        meta["mun_filter_cvegeo"] = False
+
+    return meta
+
+
 def spatial_analysis_capas_from_visor_catalog() -> Dict[str, Dict[str, Any]]:
-    """Capas DENUE y CLUES con capabilities.spatial_analysis en catalog.json."""
+    """Capas con análisis espacial configurado (wizard o legacy DENUE/CLUES)."""
     raw = load_visor_catalog_raw()
     layers = raw.get("layers") or {}
     out: Dict[str, Dict[str, Any]] = {}
@@ -244,39 +417,10 @@ def spatial_analysis_capas_from_visor_catalog() -> Dict[str, Dict[str, Any]]:
     for layer_id, entry in layers.items():
         if not isinstance(entry, dict):
             continue
-        if not (entry.get("capabilities") or {}).get("spatial_analysis"):
+        if not _catalog_layer_eligible_for_spatial_analysis(layer_id, entry):
             continue
-
         key = str(layer_id).strip().lower()
-        data = entry.get("data") or {}
-        filt = data.get("filter") or {}
-        codigos = filt.get("codigo_act")
-        table = str(data.get("table") or "").strip().lower()
-
-        # DENUE: subcapas c_denue filtradas por codigo_act (ya no usan renderer overlay_denue).
-        if table == T_DENUE and codigos:
-            out[key] = {
-                "id": key,
-                "tabla": data.get("table") or T_DENUE,
-                "etiqueta": entry.get("label") or key,
-                "descripcion": f"DENUE — {entry.get('label') or key}",
-                "geom_column": "the_geom",
-                "modo": "conteo",
-                "grupo": "denue",
-                "codigo_act": [int(c) for c in codigos],
-            }
-            continue
-
-        if key == "clues":
-            out["clues"] = {
-                "id": "clues",
-                "tabla": data.get("table") or T_CLUES,
-                "etiqueta": entry.get("label") or "Establecimientos de salud",
-                "descripcion": "Establecimientos de salud (atlas.c_clues)",
-                "geom_column": "the_geom",
-                "modo": "conteo",
-                "grupo": "salud",
-            }
+        out[key] = _spatial_meta_from_catalog_entry(key, entry)
 
     return out
 

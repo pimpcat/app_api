@@ -14,21 +14,38 @@ Seguridad:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from tables import SCHEMA, T_C_INV, T_CLUES, T_DENUE, T_ITER, T_LOC_PUNTO, qualified
-from utils import norm_cve_mun, quote_ident
-from visor_analysis_loader import inv_campos_analisis, iter_campos_analisis
+logger = logging.getLogger(__name__)
+
+from tables import SCHEMA, T_C_INV, T_DENUE, T_ITER, T_LOC_PUNTO, qualified
+from utils import mun_where_sql, norm_cve_mun, quote_ident
+from visor_analysis_loader import inv_campos_analisis, iter_campos_analisis, _flat_fields_from_sections
+from visor_attribute_filter import attribute_filter_where_sql
 from visor_catalog_loader import merge_capas_analisis
-from visor_tabular import list_clues_detail_rows, list_denue_detail_rows
+from visor_tabular import (
+    list_clues_detail_rows,
+    list_denue_detail_rows,
+)
 
 # ---------------------------------------------------------------------------
 # Catálogo de capas habilitadas para análisis espacial (data-driven).
 # INV/ITER: config/visor/analysis_catalog.json
-# DENUE/CLUES: config/visor/catalog.json (capabilities.spatial_analysis)
+# Studio / DENUE / CLUES: config/visor/catalog.json
 # ---------------------------------------------------------------------------
-CAPAS_ANALISIS: Dict[str, Dict[str, Any]] = merge_capas_analisis()
+def capas_analisis() -> Dict[str, Dict[str, Any]]:
+    return merge_capas_analisis()
+
+
+CAPAS_ANALISIS: Dict[str, Dict[str, Any]] = capas_analisis()
+
+
+def refresh_capas_analisis() -> Dict[str, Dict[str, Any]]:
+    global CAPAS_ANALISIS
+    CAPAS_ANALISIS = merge_capas_analisis()
+    return CAPAS_ANALISIS
 
 # Campos permitidos para análisis espacial sobre INV 2020 (población → vivienda).
 INV_CAMPOS_ANALISIS: List[Dict[str, str]] = inv_campos_analisis()
@@ -74,7 +91,7 @@ _CAMPO_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 
 def listar_capas_disponibles() -> List[Dict[str, str]]:
     """Lista capas expuestas al frontend para el menú desplegable."""
-    orden_grupo = {"censales": 0, "denue": 1, "salud": 2}
+    orden_grupo = {"censales": 0, "denue": 1, "salud": 2, "tematicas": 3}
     items = [
         {
             "id": meta["id"],
@@ -84,7 +101,7 @@ def listar_capas_disponibles() -> List[Dict[str, str]]:
             "grupo": meta.get("grupo", "otros"),
             "modo": meta.get("modo", "agregacion"),
         }
-        for meta in CAPAS_ANALISIS.values()
+        for meta in capas_analisis().values()
     ]
     items.sort(key=lambda c: (orden_grupo.get(c["grupo"], 9), c["etiqueta"]))
     return items
@@ -94,38 +111,150 @@ def _es_capa_conteo(meta: Mapping[str, Any]) -> bool:
     return meta.get("modo") == "conteo"
 
 
-def _sql_mun_filter(alias: str, cve: Optional[str]) -> str:
+def _mun_filter_respects_cvegeo(meta: Mapping[str, Any]) -> bool:
+    return meta.get("mun_filter_cvegeo") is not False
+
+
+def _sql_mun_filter_clause(meta: Mapping[str, Any], alias: str, cve: Optional[str]) -> str:
+    """Filtro municipal alineado con el mapa/tabular (mun_where_sql)."""
     if not cve:
         return ""
-    return f" AND TRIM({alias}.cve_mun::text) = %(cve_mun)s"
+    mun_f = meta.get("mun_filter", "cve_mun")
+    if mun_f is False:
+        return ""
+    return mun_where_sql(alias, with_cvegeo=_mun_filter_respects_cvegeo(meta))
+
+
+def _with_mun_cve_param(params: Dict[str, Any], cve: Optional[str]) -> Dict[str, Any]:
+    if not cve:
+        return params
+    return {**params, "cve": cve}
 
 
 def _sql_codigo_act_filter(alias: str, codes: Sequence[int]) -> str:
-    """Filtro codigo_act (varchar en c_denue) — solo comparación como texto."""
-    safe = [int(c) for c in codes if str(c).isdigit()]
+    """Filtro codigo_act (varchar en c_denue) — normaliza dígitos como el visor MVT."""
+    safe = [str(int(c)) for c in codes if str(c).strip().isdigit()]
     if not safe:
         return "FALSE"
-    col = f"TRIM({alias}.codigo_act::text)"
-    tests = " OR ".join(f"{col} = '{c}'" for c in safe)
-    return f"({tests})"
+    col = f"regexp_replace(TRIM({alias}.codigo_act::text), '[^0-9]', '', 'g')"
+    in_list = ", ".join(f"'{c}'" for c in safe)
+    return f"({col} IN ({in_list}))"
 
 
-def _sql_filtros_capa_conteo(meta: Mapping[str, Any], alias: str, cve: Optional[str]) -> str:
+def _sql_filtros_capa_meta(meta: Mapping[str, Any], alias: str, cve: Optional[str]) -> List[str]:
     parts = list(_sql_filtro_interseccion_poligono(alias, meta.get("geom_column", "the_geom")))
     codes = meta.get("codigo_act")
     if codes:
         parts.append(_sql_codigo_act_filter(alias, codes))
-    mun = _sql_mun_filter(alias, cve)
-    if mun:
-        parts.append(mun.lstrip(" AND "))
-    return " AND ".join(parts)
+    attr_f = meta.get("attribute_filter")
+    if attr_f:
+        attr_sql = attribute_filter_where_sql(attr_f, alias=alias)
+        if attr_sql:
+            parts.append(attr_sql)
+    mun_sql = _sql_mun_filter_clause(meta, alias, cve)
+    if mun_sql:
+        parts.append(f"({mun_sql})")
+    return parts
+
+
+def _sql_filtros_capa_conteo(meta: Mapping[str, Any], alias: str, cve: Optional[str]) -> str:
+    return " AND ".join(_sql_filtros_capa_meta(meta, alias, cve))
+
+
+def _from_sql_capa(meta: Mapping[str, Any]) -> Tuple[str, str, str]:
+    """
+    Devuelve (from_sql, geom_alias, data_alias) para consultas espaciales.
+    geom_alias se usa en filtros de intersección; data_alias en agregaciones/atributos.
+    """
+    geom_tabla = meta.get("geom_tabla")
+    join_col = (meta.get("join_column") or "cvegeo").lower()
+    tabla = meta["tabla"]
+    if geom_tabla:
+        q_geom = qualified(geom_tabla)
+        q_data = qualified(tabla)
+        geom_alias = "loc"
+        data_alias = "dat"
+        from_sql = (
+            f"{q_geom} {geom_alias} "
+            f"INNER JOIN {q_data} {data_alias} "
+            f"ON TRIM({geom_alias}.{quote_ident(join_col)}::text) = "
+            f"TRIM({data_alias}.{quote_ident(join_col)}::text)"
+        )
+        return from_sql, geom_alias, data_alias
+    data_alias = "t"
+    return f"{qualified(tabla)} {data_alias}", data_alias, data_alias
+
+
+def _sql_exists_capa(meta: Mapping[str, Any], cve: Optional[str]) -> str:
+    from_sql, geom_alias, data_alias = _from_sql_capa(meta)
+    filtros = _sql_filtros_capa_meta(meta, geom_alias, cve)
+    where_sql = " AND ".join(filtros)
+    return f"""
+        SELECT 1
+          FROM {from_sql}
+         CROSS JOIN poly
+         WHERE {where_sql}
+         LIMIT 1
+    """
+
+
+def _list_generic_detail_rows(
+    conn,
+    *,
+    meta: Mapping[str, Any],
+    detail_columns: Sequence[Mapping[str, Any]],
+    where_sql: str,
+    params: Mapping[str, Any],
+    from_sql: str,
+    with_clause: Optional[str],
+    alias: Optional[str] = None,
+) -> Dict[str, Any]:
+    from visor_tabular import _build_select_parts, _columns_with_numero, _execute_detail_query, _rows_with_numero
+
+    if alias:
+        row_alias = alias
+    elif meta.get("geom_tabla"):
+        row_alias = "dat"
+    else:
+        row_alias = "pt"
+    columns: List[Dict[str, str]] = []
+    for col in detail_columns:
+        if not isinstance(col, Mapping):
+            continue
+        field = str(col.get("columna") or col.get("column") or col.get("field") or "").strip().lower()
+        if not field or not _CAMPO_RE.match(field):
+            continue
+        label = str(col.get("etiqueta") or col.get("label") or field).strip() or field
+        columns.append({"field": field, "sql": field, "label": label})
+    if not columns:
+        return {"columns": [], "rows": [], "filas_truncadas": False}
+
+    select_parts = _build_select_parts(columns, row_alias)
+    order_gid = next((c["sql"] for c in columns if c["field"] == "gid"), None) or columns[0]["sql"]
+    order_by = f"{row_alias}.{quote_ident(order_gid)} ASC"
+    rows, truncated = _execute_detail_query(
+        conn,
+        columns=columns,
+        select_parts=select_parts,
+        from_sql=from_sql,
+        where_sql=where_sql,
+        params=params,
+        order_by=order_by,
+        with_clause=with_clause,
+    )
+    return {
+        "columns": _columns_with_numero(columns),
+        "rows": _rows_with_numero(rows),
+        "filas_truncadas": truncated,
+    }
 
 
 def _resolver_meta_tabla(nombre_tabla: str) -> Dict[str, Any]:
     clave = (nombre_tabla or "").strip().lower()
-    if clave not in CAPAS_ANALISIS:
+    capas = capas_analisis()
+    if clave not in capas:
         raise ValueError("TABLA_NO_PERMITIDA")
-    return CAPAS_ANALISIS[clave]
+    return capas[clave]
 
 
 def _etiqueta_columna(tabla: str, columna: str) -> str:
@@ -186,15 +315,32 @@ def _es_columna_agregable(lc: str, tipo: str, geom_col: str) -> bool:
     return False
 
 
+def _columnas_desde_sections(sections: Any) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    for field in _flat_fields_from_sections(sections):
+        item: Dict[str, str] = {
+            "columna": field["columna"],
+            "tipo": "character varying",
+            "agregacion": field.get("agregacion") or "sum",
+            "etiqueta": field.get("etiqueta") or field["columna"],
+        }
+        item["cast"] = "text_numeric"
+        out.append(item)
+    return out
+
+
 def listar_columnas_numericas(conn, nombre_tabla: str) -> List[Dict[str, str]]:
     """
     Columnas disponibles para el selector del análisis espacial.
 
-    Para INV 2020 devuelve el catálogo fijo acordado; otras capas usan information_schema.
+    Prioridad: sections del catálogo → catálogo fijo INV/ITER → information_schema.
     """
     meta = _resolver_meta_tabla(nombre_tabla)
     if _es_capa_conteo(meta):
         return []
+    sections = meta.get("sections")
+    if sections:
+        return _columnas_desde_sections(sections)
     if meta["id"] == "c_inv":
         return _columnas_inv_analisis()
     if meta["id"] == "iter":
@@ -490,8 +636,7 @@ def _ejecutar_conteo_puntos(
     """Cuenta puntos (DENUE, CLUES, etc.) dentro del polígono."""
     poly_sql, params = _sql_cte_poligono(geojson)
     cve = norm_cve_mun(cve_mun) if cve_mun else None
-    if cve:
-        params = {**params, "cve_mun": cve}
+    params = _with_mun_cve_param(params, cve)
 
     alias = "pt"
     q_tbl = qualified(meta["tabla"])
@@ -536,27 +681,55 @@ def _ejecutar_conteo_puntos(
     etiqueta = meta["etiqueta"]
 
     detail: Dict[str, Any] = {"columns": [], "rows": [], "filas_truncadas": False}
-    if n > 0:
-        poly_cte = f"poly AS (\n            {poly_sql}\n        )"
-        from_pt = f"{q_tbl} {alias} CROSS JOIN poly"
-        if meta["id"] == "clues":
-            detail = list_clues_detail_rows(
-                conn,
-                where_sql=where_sql,
-                params=params,
-                from_sql=from_pt,
-                with_clause=poly_cte,
+    show_detail = bool(
+        meta.get("detail_table")
+        or meta["id"] == "clues"
+        or meta.get("codigo_act")
+    )
+    if n > 0 and show_detail:
+        try:
+            detail_alias = "pt"
+            q_tbl = qualified(meta["tabla"])
+            where_parts = _sql_filtros_capa_meta(meta, detail_alias, cve)
+            where_detail = " AND ".join(where_parts)
+            poly_cte = f"poly AS (\n            {poly_sql}\n        )"
+            from_pt = f"{q_tbl} {detail_alias} CROSS JOIN poly"
+            if meta["id"] == "clues":
+                detail = list_clues_detail_rows(
+                    conn,
+                    where_sql=where_detail,
+                    params=params,
+                    from_sql=from_pt,
+                    with_clause=poly_cte,
+                )
+            elif meta.get("codigo_act"):
+                detail = list_denue_detail_rows(
+                    conn,
+                    codigo_act=meta["codigo_act"],
+                    where_sql=where_detail,
+                    params=params,
+                    from_sql=from_pt,
+                    with_clause=poly_cte,
+                    apply_codigo_filter=False,
+                )
+            elif meta.get("detail_columns"):
+                detail = _list_generic_detail_rows(
+                    conn,
+                    meta=meta,
+                    detail_columns=meta["detail_columns"],
+                    where_sql=where_detail,
+                    params=params,
+                    from_sql=from_pt,
+                    with_clause=poly_cte,
+                    alias=detail_alias,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Tabla detalle análisis espacial (%s): %s",
+                meta.get("id"),
+                exc,
             )
-        elif meta.get("codigo_act"):
-            detail = list_denue_detail_rows(
-                conn,
-                codigo_act=meta["codigo_act"],
-                where_sql=where_sql,
-                params=params,
-                from_sql=from_pt,
-                with_clause=poly_cte,
-                apply_codigo_filter=False,
-            )
+            detail = {"columns": [], "rows": [], "filas_truncadas": False}
 
     return {
         "ok": True,
@@ -591,82 +764,56 @@ def detectar_capas_intersectantes(
 ) -> List[Dict[str, Any]]:
     """
     Devuelve capas de análisis con al menos un registro intersectando el polígono.
-  """
+    """
     poly_sql, params = _sql_cte_poligono(geojson)
     cve = norm_cve_mun(cve_mun) if cve_mun else None
-    if cve:
-        params = {**params, "cve_mun": cve}
+    params = _with_mun_cve_param(params, cve)
 
-    q_inv = qualified(T_C_INV)
-    q_loc = qualified(T_LOC_PUNTO)
-    mun_inv = _sql_mun_filter("inv", cve)
-    mun_iter = _sql_mun_filter("loc", cve)
-    inv_exists = " AND ".join(_sql_filtro_interseccion_poligono("inv", "the_geom"))
-    iter_exists = " AND ".join(_sql_filtro_interseccion_poligono("loc", "the_geom"))
-
-    q_denue = qualified(T_DENUE)
-    q_clues = qualified(T_CLUES)
-    denue_intersect = " AND ".join(_sql_filtro_interseccion_poligono("pt", "the_geom"))
-    clues_intersect = " AND ".join(_sql_filtro_interseccion_poligono("cl", "the_geom"))
-    mun_denue = _sql_mun_filter("pt", cve)
-    mun_clues = _sql_mun_filter("cl", cve)
+    capas_map = capas_analisis()
+    denue_metas = [m for m in capas_map.values() if m.get("grupo") == "denue"]
+    other_metas = [m for m in capas_map.values() if m.get("grupo") != "denue"]
 
     cte_chunks = [
         f"""
         poly AS (
             {poly_sql}
-        )""",
-        f"""
-        inv_hit AS (
+        )"""
+    ]
+    select_cols: List[str] = []
+
+    for meta in other_metas:
+        capa_id = str(meta["id"]).replace("-", "_")
+        cte_chunks.append(
+            f"""
+        hit_{capa_id} AS (
             SELECT EXISTS (
-                SELECT 1
-                  FROM {q_inv} inv
-                 CROSS JOIN poly
-                 WHERE {inv_exists}{mun_inv}
-                 LIMIT 1
+                {_sql_exists_capa(meta, cve)}
             ) AS hit
-        )""",
-        f"""
-        iter_hit AS (
-            SELECT EXISTS (
-                SELECT 1
-                  FROM {q_loc} loc
-                 CROSS JOIN poly
-                 WHERE {iter_exists}{mun_iter}
-                 LIMIT 1
-            ) AS hit
-        )""",
-        f"""
-        clues_hit AS (
-            SELECT EXISTS (
-                SELECT 1
-                  FROM {q_clues} cl
-                 CROSS JOIN poly
-                 WHERE {clues_intersect}{mun_clues}
-                 LIMIT 1
-            ) AS hit
-        )""",
+        )"""
+        )
+        select_cols.append(f"(SELECT hit FROM hit_{capa_id}) AS hit_{capa_id}")
+
+    q_denue = qualified(T_DENUE)
+    denue_intersect = " AND ".join(_sql_filtro_interseccion_poligono("pt", "the_geom"))
+    mun_denue = f" AND ({mun_where_sql('pt', with_cvegeo=False)})" if cve else ""
+    codigo_act_norm = "regexp_replace(TRIM(pt.codigo_act::text), '[^0-9]', '', 'g')"
+    cte_chunks.append(
         f"""
         denue_codes AS (
             SELECT COALESCE(
                 ARRAY(
-                    SELECT DISTINCT TRIM(pt.codigo_act::text)
+                    SELECT DISTINCT {codigo_act_norm}
                       FROM {q_denue} pt
                      CROSS JOIN poly
                      WHERE {denue_intersect}{mun_denue}
                        AND pt.codigo_act IS NOT NULL
-                       AND TRIM(pt.codigo_act::text) <> ''
+                       AND {codigo_act_norm} <> ''
                 ),
                 ARRAY[]::text[]
             ) AS codes
-        )""",
-    ]
-    select_cols = [
-        "(SELECT hit FROM inv_hit) AS inv_ok",
-        "(SELECT hit FROM iter_hit) AS iter_ok",
-        "(SELECT hit FROM clues_hit) AS clues_ok",
-        "(SELECT codes FROM denue_codes) AS denue_codes",
-    ]
+        )"""
+    )
+    select_cols.append("(SELECT codes FROM denue_codes) AS denue_codes")
 
     sql = f"""
         WITH {",".join(cte_chunks)}
@@ -678,14 +825,12 @@ def detectar_capas_intersectantes(
         row = cur.fetchone() or {}
 
     capas: List[Dict[str, Any]] = []
-    orden_grupo = {"censales": 0, "denue": 1, "salud": 2}
+    orden_grupo = {"censales": 0, "denue": 1, "salud": 2, "tematicas": 3}
 
-    if row.get("inv_ok"):
-        capas.append(_capa_intersect_resumen(CAPAS_ANALISIS["c_inv"]))
-    if row.get("iter_ok"):
-        capas.append(_capa_intersect_resumen(CAPAS_ANALISIS["iter"]))
-    if row.get("clues_ok"):
-        capas.append(_capa_intersect_resumen(CAPAS_ANALISIS["clues"]))
+    for meta in other_metas:
+        capa_id = str(meta["id"]).replace("-", "_")
+        if row.get(f"hit_{capa_id}"):
+            capas.append(_capa_intersect_resumen(meta))
 
     denue_codes_raw = row.get("denue_codes") or []
     if isinstance(denue_codes_raw, str):
@@ -694,10 +839,8 @@ def detectar_capas_intersectantes(
         ]
     found_codes = {str(c).strip() for c in denue_codes_raw if str(c).strip()}
 
-    for meta in CAPAS_ANALISIS.values():
-        if meta.get("grupo") != "denue":
-            continue
-        codes = {str(c) for c in meta.get("codigo_act", [])}
+    for meta in denue_metas:
+        codes = {str(int(c)) for c in meta.get("codigo_act", []) if str(c).strip().isdigit()}
         if codes & found_codes:
             capas.append(_capa_intersect_resumen(meta))
 
@@ -738,32 +881,16 @@ def ejecutar_analisis_espacial(
         raise ValueError("SIN_CAMPOS")
 
     tabla = meta["tabla"]
-    geom_col = meta["geom_column"]
-    geom_tabla = meta.get("geom_tabla")
-    join_col = (meta.get("join_column") or "cvegeo").lower()
 
     poly_sql, params = _sql_cte_poligono(geojson)
+    cve_norm = norm_cve_mun(cve_mun) if cve_mun else None
+    params = _with_mun_cve_param(params, cve_norm)
 
-    columnas_meta, columnas = _validar_campos_solicitados(conn, meta["id"], campos_elegidos)
+    columnas_meta, _columnas = _validar_campos_solicitados(conn, meta["id"], campos_elegidos)
 
-    if geom_tabla:
-        q_geom_tbl = qualified(geom_tabla)
-        q_data_tbl = qualified(tabla)
-        q_join = quote_ident(join_col)
-        data_alias = "dat"
-        select_agg = _sql_agregaciones(columnas_meta, data_alias)
-        from_sql = (
-            f"{q_geom_tbl} loc "
-            f"INNER JOIN {q_data_tbl} {data_alias} "
-            f"ON TRIM(loc.{q_join}::text) = TRIM({data_alias}.{q_join}::text)"
-        )
-        filtros = _sql_filtro_interseccion_poligono("loc", geom_col)
-    else:
-        data_alias = "t"
-        select_agg = _sql_agregaciones(columnas_meta, data_alias)
-        from_sql = f"{qualified(tabla)} {data_alias}"
-        filtros = _sql_filtro_interseccion_poligono(data_alias, geom_col)
-
+    from_sql, geom_alias, data_alias = _from_sql_capa(meta)
+    select_agg = _sql_agregaciones(columnas_meta, data_alias)
+    filtros = _sql_filtros_capa_meta(meta, geom_alias, cve_norm)
     where_sql = " AND ".join(filtros)
     meta_sql = metadata_poligono_sql("geom4326")
 
@@ -869,5 +996,24 @@ def ejecutar_analisis_espacial(
         con_datos, sin_datos = _listar_localidades_iter_poligono(conn, poly_sql, params)
         resultado["localidades_con_datos"] = con_datos
         resultado["localidades_sin_datos"] = sin_datos
+
+    n = int(row.get("registros_intersectados") or 0)
+    if meta.get("detail_table") and meta.get("detail_columns") and n > 0:
+        from_sql_capa, geom_alias_d, data_alias_d = _from_sql_capa(meta)
+        where_detail = " AND ".join(_sql_filtros_capa_meta(meta, geom_alias_d, cve_norm))
+        poly_cte = f"poly AS (\n            {poly_sql}\n        )"
+        detail = _list_generic_detail_rows(
+            conn,
+            meta=meta,
+            detail_columns=meta["detail_columns"],
+            where_sql=where_detail,
+            params=params,
+            from_sql=f"{from_sql_capa} CROSS JOIN poly",
+            with_clause=poly_cte,
+            alias=data_alias_d,
+        )
+        resultado["columns"] = detail.get("columns") or []
+        resultado["rows"] = detail.get("rows") or []
+        resultado["filas_truncadas"] = bool(detail.get("filas_truncadas"))
 
     return resultado

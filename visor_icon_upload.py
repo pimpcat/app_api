@@ -44,6 +44,56 @@ def _validate_svg(content: bytes) -> None:
         raise ValueError("INVALID_SVG")
 
 
+_DANGEROUS_SVG_TAGS = ("script", "foreignobject", "iframe", "embed", "object", "use", "audio", "video")
+_EVENT_HANDLER_RE = re.compile(r"\s+on[a-z]+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", re.IGNORECASE)
+_JS_URL_RE = re.compile(
+    r"(href|xlink:href)\s*=\s*(\"|\')\s*javascript:[^\"\']*(\"|\')",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_svg(content: bytes) -> bytes:
+    """Elimina scripts, handlers y referencias javascript: antes de publicar el SVG."""
+    text = content.decode("utf-8", errors="replace")
+    for tag in _DANGEROUS_SVG_TAGS:
+        text = re.sub(
+            rf"<{tag}\b[^>]*>.*?</{tag}>",
+            "",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        text = re.sub(rf"<{tag}\b[^>]*/>", "", text, flags=re.IGNORECASE)
+    text = _EVENT_HANDLER_RE.sub("", text)
+    text = _JS_URL_RE.sub(r'\1=""', text)
+    return text.encode("utf-8")
+
+
+def _normalize_svg_for_map(content: bytes) -> bytes:
+    """Quita metadatos potrace y deja que viewBox defina la proporción."""
+    text = content.decode("utf-8", errors="replace")
+    text = re.sub(r"<!DOCTYPE[^>]*>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<\?xml[^?]*\?>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r'\s+width="[^"]*"', "", text, count=1)
+    text = re.sub(r'\s+height="[^"]*"', "", text, count=1)
+    if "preserveAspectRatio" not in text:
+        text = re.sub(r"<svg\b", '<svg preserveAspectRatio="xMidYMid meet"', text, count=1)
+    return text.strip().encode("utf-8")
+
+
+def _svg_viewbox_aspect(text: str) -> Optional[float]:
+    m = re.search(
+        r'viewBox\s*=\s*["\']?\s*[\d.]+\s+[\d.]+\s+([\d.]+)\s+([\d.]+)',
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        return None
+    w, h = float(m.group(1)), float(m.group(2))
+    if w <= 0 or h <= 0:
+        return None
+    return w / h
+
+
 def register_custom_icon(
     icon_key: str,
     label: str,
@@ -65,19 +115,35 @@ def register_custom_icon(
 
     file_name = key.replace("_", "-") + ".svg"
     map_id = f"atlas-{key.replace('_', '-')}"
+    sanitized = _sanitize_svg(svg_content)
+    normalized = _normalize_svg_for_map(sanitized)
+    text_norm = normalized.decode("utf-8", errors="replace")
+    aspect = _svg_viewbox_aspect(text_norm)
+    is_tall_pin = aspect is not None and aspect < 0.92
+    prev = icons.get(key) or {}
+    next_version = int(prev.get("version") or 0) + 1 if key in icons else 1
     icons[key] = {
         "id": map_id,
         "file": file_name,
         "label": label_s,
-        "size_profile": "standard_zoom",
+        "size_profile": "pin_zoom" if is_tall_pin else "standard_zoom",
         "logical_px": 32,
         "max_scale": 2.63,
-        "version": 1,
+        "supersample": 4,
+        "texture_anchor": "bottom" if is_tall_pin else "center",
+        "version": next_version,
     }
 
     map_dir = _icons_map_dir()
     map_dir.mkdir(parents=True, exist_ok=True)
-    (map_dir / file_name).write_bytes(svg_content)
+    (map_dir / file_name).write_bytes(normalized)
     json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    return {"icon_key": key, "label": label_s, "file": file_name, "id": map_id}
+    return {
+        "icon_key": key,
+        "label": label_s,
+        "file": file_name,
+        "id": map_id,
+        "version": next_version,
+        "texture_anchor": icons[key]["texture_anchor"],
+    }

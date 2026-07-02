@@ -31,6 +31,9 @@ CREATE INDEX IF NOT EXISTS idx_catalog_audit_layer
 CREATE INDEX IF NOT EXISTS idx_catalog_audit_created
   ON atlas_admin.catalog_audit (created_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_catalog_audit_action
+  ON atlas_admin.catalog_audit (action, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS atlas_admin.layer_publications (
   id               SERIAL PRIMARY KEY,
   layer_id         TEXT NOT NULL UNIQUE,

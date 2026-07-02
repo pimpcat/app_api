@@ -52,10 +52,23 @@ def get_settings():
         "schema": os.getenv("ATLAS_SCHEMA", "atlas").strip() or "atlas",
         "jwt_secret": os.getenv("JWT_SECRET", "").strip(),
         "jwt_expire_hours": int(os.getenv("JWT_EXPIRE_HOURS", "8") or "8"),
-        "cors_origins": [
-            o.strip()
-            for o in os.getenv("CORS_ORIGINS", "").split(",")
-            if o.strip()
-        ]
-        or default_cors_origins(),
+        "cors_origins": _parse_cors_origins(),
+        "enable_api_docs": os.getenv("ENABLE_API_DOCS", "false").strip().lower()
+        in ("1", "true", "yes", "on"),
     }
+
+
+def _parse_cors_origins() -> list[str]:
+    raw = os.getenv("CORS_ORIGINS", "").strip()
+    if raw:
+        items = [o.strip() for o in raw.split(",") if o.strip()]
+    else:
+        items = default_cors_origins()
+    # Sin duplicados, orden estable
+    seen: set[str] = set()
+    out: list[str] = []
+    for origin in items:
+        if origin not in seen:
+            seen.add(origin)
+            out.append(origin)
+    return out

@@ -30,6 +30,8 @@ PRESET_LABELS = {
     "polygon_by_attribute": "Polígono por atributo",
 }
 
+CLUSTER_PRESET_IDS = frozenset({"standard", "compact", "wide", "sparse"})
+
 # Presets avanzados / compuestos — no se ofrecen en Visor Studio (Fase 3).
 ADMIN_PRESET_EXCLUDE = frozenset(
     {
@@ -140,7 +142,11 @@ def load_icons_meta() -> List[Dict[str, str]]:
                 return []
             icons = data.get("icons") or {}
             return [
-                {"key": key, "label": (val.get("label") or key)}
+                {
+                    "key": key,
+                    "label": (val.get("label") or key),
+                    "version": val.get("version", 1),
+                }
                 for key, val in icons.items()
                 if isinstance(val, dict)
             ]
@@ -186,6 +192,14 @@ def validate_layer_payload(payload: Dict[str, Any], icon_keys: Optional[Sequence
             warnings.append("style.field requerido para preset por atributo")
         if not isinstance(classes, list) or not classes:
             warnings.append("style.classes requiere al menos una clase valor/color")
+    minz = style.get("minzoom")
+    if minz is not None:
+        try:
+            mz = float(minz)
+            if mz < 0 or mz > 22:
+                warnings.append("style.minzoom debe estar entre 0 y 22")
+        except (TypeError, ValueError):
+            warnings.append("style.minzoom debe ser numérico")
     data = payload.get("data") or {}
     denue = payload.get("denue") or {}
     if str(table).lower() == "c_denue":
@@ -204,6 +218,11 @@ def validate_layer_payload(payload: Dict[str, Any], icon_keys: Optional[Sequence
     export_cols = data.get("export_columns")
     if export_cols is not None and not isinstance(export_cols, list):
         warnings.append("data.export_columns debe ser array")
+    filt = data.get("filter")
+    if isinstance(filt, dict) and filt.get("field") and not filt.get("codigo_act"):
+        values = filt.get("values")
+        if not isinstance(values, list) or not values:
+            warnings.append("data.filter.values requiere al menos un valor cuando hay filter.field")
     labels = payload.get("labels")
     if isinstance(labels, dict) and labels.get("field"):
         minz = labels.get("minzoom")
@@ -212,6 +231,72 @@ def validate_layer_payload(payload: Dict[str, Any], icon_keys: Optional[Sequence
                 float(minz)
             except (TypeError, ValueError):
                 warnings.append("labels.minzoom debe ser numérico")
+    search = payload.get("search")
+    if isinstance(search, dict) and search.get("enabled"):
+        name_col = str(search.get("name_column") or "").strip()
+        if not name_col:
+            warnings.append("search.name_column requerido cuando la búsqueda está activa")
+        id_col = str(search.get("id_column") or "").strip()
+        if not id_col:
+            warnings.append("search.id_column requerido cuando la búsqueda está activa")
+        search_cols = search.get("search_columns")
+        if search_cols is not None and not isinstance(search_cols, list):
+            warnings.append("search.search_columns debe ser array")
+    caps = payload.get("capabilities") or {}
+    if caps.get("spatial_analysis"):
+        spatial = payload.get("spatial_analysis")
+        if not isinstance(spatial, dict):
+            warnings.append("spatial_analysis debe ser un objeto cuando la capability está activa")
+        else:
+            modo = str(spatial.get("modo") or "").strip().lower()
+            if modo and modo not in ("agregacion", "conteo"):
+                warnings.append("spatial_analysis.modo debe ser 'agregacion' o 'conteo'")
+            if modo == "agregacion" or (not modo and geometry not in ("point",)):
+                sections = spatial.get("sections")
+                if sections is not None and not isinstance(sections, list):
+                    warnings.append("spatial_analysis.sections debe ser array")
+                elif modo == "agregacion":
+                    has_fields = False
+                    if isinstance(sections, list):
+                        for section in sections:
+                            if isinstance(section, dict) and section.get("campos"):
+                                has_fields = True
+                                break
+                    if not has_fields:
+                        warnings.append(
+                            "spatial_analysis: seleccione al menos un indicador para modo agregación"
+                        )
+            detail_cols = spatial.get("detail_columns")
+            if spatial.get("detail_table"):
+                if detail_cols is not None and not isinstance(detail_cols, list):
+                    warnings.append("spatial_analysis.detail_columns debe ser array")
+                elif not detail_cols:
+                    warnings.append(
+                        "spatial_analysis.detail_columns requiere al menos una columna con tabla detalle activa"
+                    )
+            elif detail_cols is not None and not isinstance(detail_cols, list):
+                warnings.append("spatial_analysis.detail_columns debe ser array")
+    if caps.get("tabular"):
+        tabular = payload.get("tabular")
+        if not isinstance(tabular, dict):
+            warnings.append("tabular debe ser un objeto cuando la capability está activa")
+        else:
+            columns = tabular.get("columns")
+            if columns is not None and not isinstance(columns, list):
+                warnings.append("tabular.columns debe ser array")
+            elif not columns:
+                warnings.append("tabular: seleccione al menos una columna para la consulta tabular")
+    geometry = str(payload.get("geometry") or "").strip().lower()
+    style = payload.get("style") or {}
+    cluster = style.get("cluster") if isinstance(style, dict) else None
+    if isinstance(cluster, dict) and cluster.get("enabled"):
+        if geometry != "point":
+            warnings.append("style.cluster solo aplica a capas de geometría point")
+        preset = str(cluster.get("preset") or "standard").strip().lower()
+        if preset not in CLUSTER_PRESET_IDS:
+            warnings.append(
+                f"style.cluster.preset debe ser uno de: {', '.join(CLUSTER_PRESET_IDS)}"
+            )
     return warnings
 
 
@@ -223,12 +308,156 @@ def validate_layer_update_payload(payload: Dict[str, Any], layer_id: str, icons:
     return warnings
 
 
+def _default_spatial_modo(geometry: str) -> str:
+    return "conteo" if (geometry or "").strip().lower() == "point" else "agregacion"
+
+
+def _normalize_spatial_field(field: Any) -> Optional[Dict[str, str]]:
+    if isinstance(field, dict):
+        col = field.get("columna") or field.get("column") or field.get("field")
+        if not col or not str(col).strip():
+            return None
+        col_s = str(col).strip().lower()
+        label = str(field.get("etiqueta") or field.get("label") or col_s).strip() or col_s
+        agg = str(field.get("agregacion") or "sum").strip().lower()
+        if agg not in ("sum", "avg"):
+            agg = "sum"
+        return {"columna": col_s, "etiqueta": label, "agregacion": agg}
+    return None
+
+
+def _normalize_spatial_detail_column(field: Any) -> Optional[Dict[str, str]]:
+    if isinstance(field, dict):
+        col = field.get("columna") or field.get("column") or field.get("field")
+        if not col or not str(col).strip():
+            return None
+        col_s = str(col).strip().lower()
+        label = str(field.get("etiqueta") or field.get("label") or col_s).strip() or col_s
+        return {"columna": col_s, "etiqueta": label}
+    return None
+
+
+def _normalize_spatial_analysis_block(
+    spatial: Dict[str, Any],
+    *,
+    geometry: str,
+) -> Dict[str, Any]:
+    modo = str(spatial.get("modo") or _default_spatial_modo(geometry)).strip().lower()
+    if modo not in ("agregacion", "conteo"):
+        modo = _default_spatial_modo(geometry)
+
+    block: Dict[str, Any] = {
+        "modo": modo,
+        "geom_column": str(spatial.get("geom_column") or "the_geom").strip() or "the_geom",
+    }
+    grupo = str(spatial.get("grupo") or "").strip()
+    if grupo:
+        block["grupo"] = grupo
+
+    if spatial.get("detail_table"):
+        block["detail_table"] = True
+
+    detail_cols: List[Dict[str, str]] = []
+    for item in spatial.get("detail_columns") or []:
+        norm = _normalize_spatial_detail_column(item)
+        if norm:
+            detail_cols.append(norm)
+    if detail_cols:
+        block["detail_columns"] = detail_cols
+
+    if modo == "agregacion":
+        sections_in = spatial.get("sections")
+        campos: List[Dict[str, str]] = []
+        if isinstance(sections_in, list):
+            for section in sections_in:
+                if not isinstance(section, dict):
+                    continue
+                for field in section.get("campos") or []:
+                    norm = _normalize_spatial_field(field)
+                    if norm:
+                        campos.append(norm)
+        elif isinstance(spatial.get("campos"), list):
+            for field in spatial["campos"]:
+                norm = _normalize_spatial_field(field)
+                if norm:
+                    campos.append(norm)
+        if campos:
+            titulo = "Indicadores"
+            if isinstance(sections_in, list) and sections_in:
+                first = sections_in[0]
+                if isinstance(first, dict) and str(first.get("titulo") or "").strip():
+                    titulo = str(first["titulo"]).strip()
+            block["sections"] = [{"titulo": titulo, "campos": campos}]
+
+    ui_in = spatial.get("ui") if isinstance(spatial.get("ui"), dict) else {}
+    ui: Dict[str, str] = {}
+    unidad = str(ui_in.get("unidad_registro") or spatial.get("unidad_registro") or "").strip()
+    empty_msg = str(ui_in.get("empty_msg") or spatial.get("empty_msg") or "").strip()
+    if unidad:
+        ui["unidad_registro"] = unidad
+    if empty_msg:
+        ui["empty_msg"] = empty_msg
+    if ui:
+        block["ui"] = ui
+
+    if spatial.get("geom_tabla"):
+        block["geom_tabla"] = str(spatial["geom_tabla"]).strip()
+    if spatial.get("join_column"):
+        block["join_column"] = str(spatial["join_column"]).strip()
+
+    return block
+
+
+def _normalize_tabular_column(field: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(field, dict):
+        col = field.get("field") or field.get("columna") or field.get("column")
+        if not col or not str(col).strip():
+            return None
+        col_s = str(col).strip().lower()
+        label = str(field.get("label") or field.get("etiqueta") or col_s).strip() or col_s
+        out: Dict[str, Any] = {"field": col_s, "label": label}
+        candidates = field.get("candidates")
+        if isinstance(candidates, list) and candidates:
+            out["candidates"] = [str(c).strip() for c in candidates if str(c).strip()]
+        return out
+    return None
+
+
+def _normalize_tabular_block(tabular: Dict[str, Any]) -> Dict[str, Any]:
+    columns: List[Dict[str, Any]] = []
+    for item in tabular.get("columns") or []:
+        norm = _normalize_tabular_column(item)
+        if norm:
+            columns.append(norm)
+    block: Dict[str, Any] = {"columns": columns}
+    preset = str(tabular.get("preset") or "").strip().lower()
+    if preset:
+        block["preset"] = preset
+    return block
+
+
+def _normalize_cluster_style(style: Dict[str, Any], *, geometry: str) -> Dict[str, Any]:
+    out = dict(style)
+    cluster = out.get("cluster")
+    if not isinstance(cluster, dict) or not cluster.get("enabled"):
+        out.pop("cluster", None)
+        return out
+    if (geometry or "").strip().lower() != "point":
+        out.pop("cluster", None)
+        return out
+    preset = str(cluster.get("preset") or "standard").strip().lower()
+    if preset not in CLUSTER_PRESET_IDS:
+        preset = "standard"
+    out["cluster"] = {"enabled": True, "preset": preset}
+    return out
+
+
 def build_layer_entry(payload: Dict[str, Any]) -> Dict[str, Any]:
     layer_id = slug_layer_id(payload.get("layer_id") or "")
     preset = payload.get("style_preset")
     pmeta = preset_meta(str(preset or "")) or PHASE1_PRESETS.get(preset) or {}
     geometry = payload.get("geometry") or pmeta.get("geometry") or "point"
-    style = dict(payload.get("style") or {})
+    style = _normalize_cluster_style(dict(payload.get("style") or {}), geometry=str(geometry))
     data = dict(payload.get("data") or {})
     payload_mun = payload.get("mun_filter")
     data_mun = data.get("mun_filter")
@@ -238,17 +467,38 @@ def build_layer_entry(payload: Dict[str, Any]) -> Dict[str, Any]:
         data.setdefault("mun_filter", data_mun or payload_mun or "cve_mun")
 
     export_columns = data.pop("export_columns", None)
+    export_in = data.pop("export", None)
+    export_out: Dict[str, Any] = dict(export_in) if isinstance(export_in, dict) else {}
     if export_columns:
-        data["export"] = {"mode": "columns", "columns": list(export_columns)}
-    elif isinstance(data.get("export"), dict) and data["export"].get("columns"):
-        data["export"] = dict(data["export"])
+        export_out["mode"] = "columns"
+        export_out["columns"] = list(export_columns)
+    kml_nf = str(export_out.get("kml_name_field") or "").strip()
+    if kml_nf:
+        export_out["kml_name_field"] = kml_nf
+    else:
+        export_out.pop("kml_name_field", None)
+    if export_out:
+        export_out.setdefault("mode", "all")
+        data["export"] = export_out
 
     denue = payload.get("denue") or {}
     table_lower = str(data.get("table") or "").strip().lower()
     codigos = denue.get("codigo_act") or (data.get("filter") or {}).get("codigo_act")
+    payload_filter = dict(data.get("filter") or {})
     if table_lower == "c_denue" and codigos:
         data["filter"] = {"codigo_act": [int(c) for c in codigos]}
         data.setdefault("gid_table", "c_denue")
+    elif payload_filter.get("field") and payload_filter.get("values"):
+        values = [str(v).strip() for v in payload_filter["values"] if str(v).strip()]
+        if values:
+            data["filter"] = {
+                "field": str(payload_filter["field"]).strip(),
+                "values": values,
+            }
+        else:
+            data.pop("filter", None)
+    elif "filter" in data and not payload_filter.get("codigo_act"):
+        data.pop("filter", None)
 
     caps = dict(payload.get("capabilities") or {})
     caps.setdefault("export", [])
@@ -312,6 +562,16 @@ def build_layer_entry(payload: Dict[str, Any]) -> Dict[str, Any]:
             color = labels.get("color")
             if color and str(color).strip():
                 label_block["color"] = str(color).strip()
+            off = labels.get("offset")
+            if isinstance(off, (list, tuple)) and len(off) >= 2:
+                try:
+                    label_block["offset"] = [float(off[0]), float(off[1])]
+                except (TypeError, ValueError):
+                    pass
+            if geom == "polygon":
+                label_block["source"] = str(labels.get("source") or "centroid")
+            elif labels.get("source"):
+                label_block["source"] = str(labels.get("source")).strip()
             entry["labels"] = label_block
     legend = payload.get("legend")
     if legend:
@@ -320,6 +580,65 @@ def build_layer_entry(payload: Dict[str, Any]) -> Dict[str, Any]:
         entry["overlay_key"] = payload["overlay_key"]
     if payload.get("checkbox_id"):
         entry["checkbox_id"] = payload["checkbox_id"]
+    search = payload.get("search")
+    if isinstance(search, dict) and search.get("enabled"):
+        name_col = str(search.get("name_column") or "").strip()
+        if name_col:
+            id_col = str(search.get("id_column") or "cvegeo").strip() or "cvegeo"
+            search_columns = search.get("search_columns")
+            if not isinstance(search_columns, list) or not search_columns:
+                search_columns = [name_col]
+            else:
+                search_columns = [str(c).strip() for c in search_columns if str(c).strip()]
+                if name_col not in search_columns:
+                    search_columns.insert(0, name_col)
+            mun_f = data.get("mun_filter")
+            scope = str(search.get("scope") or "").strip().lower()
+            if scope not in ("both", "municipio", "estatal"):
+                scope = "estatal" if mun_f is False else "both"
+            geom_mode = str(search.get("geom_mode") or "").strip().lower()
+            if geom_mode not in ("point", "centroid", "polygon"):
+                geom_mode = "point" if geometry == "point" else ("polygon" if geometry == "polygon" else "centroid")
+            search_block: Dict[str, Any] = {
+                "enabled": True,
+                "tipo": str(search.get("tipo") or payload.get("label") or layer_id),
+                "name_column": name_col,
+                "id_column": id_col,
+                "search_columns": search_columns,
+                "geom_mode": geom_mode,
+                "scope": scope,
+            }
+            if search.get("highlight") is False:
+                search_block["highlight"] = False
+            entry["search"] = search_block
+    spatial = payload.get("spatial_analysis")
+    if caps.get("spatial_analysis") and isinstance(spatial, dict):
+        entry["spatial_analysis"] = _normalize_spatial_analysis_block(
+            spatial,
+            geometry=str(entry.get("geometry") or geometry),
+        )
+    tabular = payload.get("tabular")
+    if caps.get("tabular") and isinstance(tabular, dict):
+        entry["tabular"] = _normalize_tabular_block(tabular)
+    spatial_block = entry.get("spatial_analysis") or {}
+    if (
+        caps.get("spatial_analysis")
+        and spatial_block.get("detail_table")
+        and not spatial_block.get("detail_columns")
+        and isinstance(entry.get("tabular"), dict)
+    ):
+        detail_from_tab: List[Dict[str, str]] = []
+        for col in entry["tabular"].get("columns") or []:
+            if not isinstance(col, dict):
+                continue
+            field = str(col.get("field") or "").strip().lower()
+            if not field:
+                continue
+            label = str(col.get("label") or field).strip() or field
+            detail_from_tab.append({"columna": field, "etiqueta": label})
+        if detail_from_tab:
+            spatial_block = {**spatial_block, "detail_columns": detail_from_tab}
+            entry["spatial_analysis"] = spatial_block
     return entry
 
 

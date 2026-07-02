@@ -1,13 +1,14 @@
 """Login y sesión admin del Visor."""
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from auth.deps import require_admin_user
 from auth.jwt_tokens import create_access_token
 from auth.passwords import verify_password
+from auth.rate_limit import enforce_admin_login_rate_limit
 from auth.users import get_user_by_username, touch_last_login
 
 router = APIRouter(prefix="/api/admin", tags=["admin-auth"])
@@ -19,7 +20,8 @@ class LoginBody(BaseModel):
 
 
 @router.post("/login")
-def admin_login(body: LoginBody) -> Dict[str, Any]:
+def admin_login(body: LoginBody, request: Request) -> Dict[str, Any]:
+    enforce_admin_login_rate_limit(request)
     user = get_user_by_username(body.username)
     if not user or not user.get("active"):
         raise HTTPException(

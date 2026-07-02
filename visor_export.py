@@ -15,6 +15,7 @@ import shapefile
 from column_resolver import resolve_column
 from tables import SCHEMA, qualified
 from utils import mun_where_sql, norm_cve_mun, quote_ident
+from visor_attribute_filter import attribute_filter_where_sql
 from visor_layers import layer_config
 
 logger = logging.getLogger(__name__)
@@ -208,6 +209,14 @@ def _geom_expr(geom_col: str) -> str:
     return f"ST_AsGeoJSON(ST_Force2D(ST_Transform({q}, 4326)), 6)::text AS geom_json"
 
 
+def _append_where_parts(cfg: Dict[str, Any], parts: List[str]) -> None:
+    attr_f = cfg.get("attribute_filter")
+    if isinstance(attr_f, dict):
+        sql = attribute_filter_where_sql(attr_f)
+        if sql:
+            parts.append(sql)
+
+
 def build_select_sql(
     cfg: Dict[str, Any],
     cols: Sequence[str],
@@ -221,6 +230,7 @@ def build_select_sql(
     where_parts = [f"{q_geom} IS NOT NULL"]
     if apply_mun_filter:
         where_parts.append(mun_where_sql("", with_cvegeo))
+    _append_where_parts(cfg, where_parts)
     where = " AND ".join(where_parts)
     if cfg.get("from_sql"):
         return (
@@ -243,6 +253,7 @@ def build_count_sql(
     where_parts = [f"{quote_ident(geom_col)} IS NOT NULL"]
     if apply_mun_filter:
         where_parts.append(mun_where_sql("", with_cvegeo))
+    _append_where_parts(cfg, where_parts)
     where = " AND ".join(where_parts)
     from_part = cfg["from_sql"] if cfg.get("from_sql") else qualified(cfg["table"])
     return f"SELECT COUNT(*)::int AS n FROM {from_part} WHERE {where}"
@@ -356,22 +367,64 @@ def geojson_to_kml_fragment(geom: Dict[str, Any]) -> str:
     return ""
 
 
-def _pick_placemark_name(row: Dict[str, Any], cols: Sequence[str]) -> str:
-    for key in (
-        "nom_estab",
-        "nom_insti",
-        "nom_comer",
-        "nom_insadm",
-        "nom_tipo",
-        "tipo",
-        "nom_loc",
-        "nomvial",
-        "nomvial1",
-        "descripcio",
-        "gid",
-    ):
-        if key in row and row[key] not in (None, ""):
-            return str(row[key])
+_KML_NAME_CANDIDATES = (
+    "nombre",
+    "nom_loc",
+    "nomgeo",
+    "nom_asen",
+    "nom_estab",
+    "nom_comer",
+    "name",
+    "nom_insti",
+    "nom_insadm",
+    "nom_tipo",
+    "nomvial",
+    "nomvial1",
+    "descripcio",
+    "tipo",
+)
+
+_KML_NAME_SKIP = frozenset({"gid", "cvegeo", "cve_ent", "cve_mun", "cve_loc"})
+
+
+def _infer_kml_name_field(cols: Sequence[str]) -> Optional[str]:
+    """Misma heurística que el wizard (defaultKmlNameField / SEARCH_NAME_CANDIDATES)."""
+    lower_cols = {str(c).lower(): str(c) for c in cols}
+    for cand in _KML_NAME_CANDIDATES:
+        if cand in lower_cols:
+            return lower_cols[cand]
+    for c in cols:
+        lc = str(c).lower()
+        if lc not in _KML_NAME_SKIP:
+            return str(c)
+    return None
+
+
+def _pick_placemark_name(
+    row: Dict[str, Any],
+    cols: Sequence[str],
+    name_field: Optional[str] = None,
+) -> str:
+    if name_field:
+        key = str(name_field).strip()
+        if key:
+            row_lc = {str(k).lower(): k for k in row}
+            rk = row_lc.get(key.lower())
+            if rk is not None and row[rk] not in (None, ""):
+                return str(row[rk])
+    row_lc = {str(k).lower(): k for k in row}
+    for key in _KML_NAME_CANDIDATES:
+        rk = row_lc.get(key)
+        if rk is not None and row[rk] not in (None, ""):
+            return str(row[rk])
+    if "gid" in row and row["gid"] not in (None, ""):
+        return str(row["gid"])
+    for c in cols:
+        lc = str(c).lower()
+        if lc in _KML_NAME_SKIP:
+            continue
+        if row.get(c) not in (None, ""):
+            return str(row[c])
     for c in cols:
         if row.get(c) not in (None, ""):
             return str(row[c])
@@ -392,6 +445,7 @@ def stream_kml(
     cols: Sequence[str],
     cve: str,
     nom_mun: Optional[str],
+    name_field: Optional[str] = None,
 ) -> bytes:
     title = f"{layer_label} — Municipio {cve}"
     if nom_mun:
@@ -412,7 +466,7 @@ def stream_kml(
         parts = flatten_geometries_for_export(geom)
         if not parts:
             continue
-        base_name = _pick_placemark_name(row, cols)
+        base_name = _pick_placemark_name(row, cols, name_field)
         desc = _attr_table_html(row, cols)
         for i, part in enumerate(parts):
             kml_geom = geojson_to_kml_fragment(part)
@@ -686,7 +740,19 @@ def export_layer(conn, layer_id: str, fmt: str, cve: str, nom_mun: str):
         base = f"atlas_{slug_layer}_estatal"
 
     if fmt == "kml":
-        data = stream_kml(rows, cfg.get("label", layer_key), cols, cve, nom_mun or None)
+        export_cfg = _normalize_export_cfg(cfg)
+        kml_name_field = (
+            str(export_cfg.get("kml_name_field") or "").strip()
+            or _infer_kml_name_field(cols)
+        )
+        data = stream_kml(
+            rows,
+            cfg.get("label", layer_key),
+            cols,
+            cve,
+            nom_mun or None,
+            name_field=kml_name_field,
+        )
         if b"<Placemark>" not in data:
             raise ValueError("NO_GEOMETRIES")
         return data, f"{base}.kml", "application/vnd.google-earth.kml+xml; charset=UTF-8"

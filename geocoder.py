@@ -128,6 +128,37 @@ def _fetch_rows_for_entry(
     return rows
 
 
+def _interleave_search_results(
+    rows: List[Dict[str, Any]], max_total: int = 30
+) -> List[Dict[str, Any]]:
+    """Mezcla resultados por fuente para que capas distintas aparezcan en las primeras sugerencias."""
+    if not rows or max_total <= 0:
+        return []
+    by_table: Dict[str, List[Dict[str, Any]]] = {}
+    order: List[str] = []
+    for row in rows:
+        tabla = str(row.get("tabla_origen") or "").strip().lower() or "_"
+        if tabla not in by_table:
+            by_table[tabla] = []
+            order.append(tabla)
+        by_table[tabla].append(row)
+    out: List[Dict[str, Any]] = []
+    idx = 0
+    while len(out) < max_total:
+        added = False
+        for tabla in order:
+            bucket = by_table.get(tabla) or []
+            if idx < len(bucket):
+                out.append(bucket[idx])
+                added = True
+                if len(out) >= max_total:
+                    break
+        if not added:
+            break
+        idx += 1
+    return out
+
+
 def buscar_lugares(
     q: str,
     cve_mun: Optional[str] = None,
@@ -170,4 +201,4 @@ def buscar_lugares(
                 entry.get("table"),
                 exc,
             )
-    return rows
+    return _interleave_search_results(rows)

@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from tables import qualified
 from utils import mun_where_sql
+from visor_attribute_filter import attribute_filter_where_sql, parse_attribute_filter
 from visor_catalog_loader import load_visor_catalog_raw
 
 _IDENT_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
@@ -86,7 +87,7 @@ def _entry_from_layer(layer_id: str, layer: Dict[str, Any]) -> Optional[Dict[str
     if mun_filter_cvegeo is None:
         mun_filter_cvegeo = data.get("mun_filter_cvegeo") is not False
 
-    return {
+    item = {
         "layer_id": layer_id,
         "table": _safe_table(str(table)),
         "tipo": str(search.get("tipo") or layer.get("label") or layer_id),
@@ -100,6 +101,10 @@ def _entry_from_layer(layer_id: str, layer: Dict[str, Any]) -> Optional[Dict[str
         "highlight": search.get("highlight", True),
         "codigo_act": tuple(int(c) for c in codigos) if codigos else None,
     }
+    attr_f = parse_attribute_filter(data)
+    if attr_f:
+        item["attribute_filter"] = attr_f
+    return item
 
 
 def _entry_from_extra(extra: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -162,9 +167,9 @@ def search_index_from_catalog() -> List[Dict[str, Any]]:
 def clear_search_catalog_cache() -> None:
     """Invalida caché tras editar catalog.json (útil en desarrollo)."""
     search_index_from_catalog.cache_clear()
-    from visor_catalog_loader import load_visor_catalog_raw
+    from visor_catalog_loader import invalidate_visor_catalog_cache
 
-    load_visor_catalog_raw.cache_clear()
+    invalidate_visor_catalog_cache()
 
 
 def search_limit_per_source() -> int:
@@ -264,6 +269,12 @@ def build_search_sql_for_entry(
 
     if entry.get("codigo_act"):
         where_parts.append(_codigo_act_predicate(entry["codigo_act"]))
+
+    attr_f = entry.get("attribute_filter")
+    if isinstance(attr_f, dict):
+        attr_sql = attribute_filter_where_sql(attr_f)
+        if attr_sql:
+            where_parts.append(attr_sql)
 
     where_sql = " AND ".join(where_parts)
     return f"""(
