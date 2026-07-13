@@ -49,12 +49,14 @@ try:
     from routers.admin_auth import router as admin_auth_router
     from routers.admin_users import router as admin_users_router
     from routers.visor_admin import router as visor_admin_router
+    from routers.indicators_admin import router as indicators_admin_router
 
     app.include_router(admin_auth_router)
     app.include_router(admin_users_router)
     app.include_router(visor_admin_router)
+    app.include_router(indicators_admin_router)
 except Exception as exc:
-    logger.warning("Módulo admin visor no disponible: %s", exc)
+    logger.warning("Módulo admin visor/indicadores no disponible: %s", exc)
 
 
 @app.get("/")

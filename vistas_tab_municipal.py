@@ -134,6 +134,7 @@ def _build_ranking_vista(
     estatal_label: str = "Entidad Federativa",
     cve_range: Optional[Tuple[int, int]] = None,
     skip_nacional_in_mun: bool = False,
+    ranking_size: int = 5,
 ) -> Dict[str, Any]:
     db_rows = _load_tab_municipal(conn, metrics)
     parsers = {alias: parser for alias, _, parser in metrics}
@@ -151,7 +152,9 @@ def _build_ranking_vista(
     def fmt(r: Dict[str, Any], h: bool) -> Dict[str, Any]:
         return _fmt_row(r, h, None, field_names)
 
-    out = build_top_bottom_response(municipios, sort_key, cve_selected, nom_sel_norm, fmt)
+    out = build_top_bottom_response(
+        municipios, sort_key, cve_selected, nom_sel_norm, fmt, ranking_size=ranking_size
+    )
 
     if nacional is not None and not skip_nacional_in_mun:
         out["tabla_nacional"] = _fmt_row(nacional, False, nacional_label, field_names)
@@ -160,7 +163,9 @@ def _build_ranking_vista(
     return out
 
 
-def build_vivienda_participacion_response(conn, cve_selected: str, nom_sel_norm: str) -> Dict[str, Any]:
+def build_vivienda_participacion_response(
+    conn, cve_selected: str, nom_sel_norm: str, *, ranking_size: int = 5
+) -> Dict[str, Any]:
     metrics: Sequence[MetricSpec] = [
         ("part_por_vivh", ("part_por_vivh", "PART_POR_VIVH", "partporvivh"), "float"),
         ("creci_00_10", ("creci_00_10", "CRECI_00_10", "pcreci_00_10", "PCRECI_00_10", "creci_0010"), "float"),
@@ -178,7 +183,9 @@ def build_vivienda_participacion_response(conn, cve_selected: str, nom_sel_norm:
     def fmt(r: Dict[str, Any], h: bool) -> Dict[str, Any]:
         return _fmt_row(r, h, None, fields)
 
-    out = build_top_bottom_response(municipios, "part_por_vivh", cve_selected, nom_sel_norm, fmt)
+    out = build_top_bottom_response(
+        municipios, "part_por_vivh", cve_selected, nom_sel_norm, fmt, ranking_size=ranking_size
+    )
     if nacional:
         out["nacional"] = {
             "nom_mun": nacional.get("nom_mun") or "Nacional",
@@ -198,7 +205,9 @@ def build_vivienda_participacion_response(conn, cve_selected: str, nom_sel_norm:
     return out
 
 
-def build_poblacion_ocupada_response(conn, cve_selected: str, nom_sel_norm: str) -> Dict[str, Any]:
+def build_poblacion_ocupada_response(
+    conn, cve_selected: str, nom_sel_norm: str, *, ranking_size: int = 5
+) -> Dict[str, Any]:
     nat_rows, has_estatal = _load_tab_nacional(
         conn, [("pea_ocup", ("pea_ocup", "PEA_OCUP", "pea_ocupada", "PEA_OCUPADA"))]
     )
@@ -246,7 +255,9 @@ def build_poblacion_ocupada_response(conn, cve_selected: str, nom_sel_norm: str)
     def fmt(r: Dict[str, Any], h: bool) -> Dict[str, Any]:
         return _fmt_row(r, h, None, fields)
 
-    out = build_top_bottom_response(municipios, "ocupada", cve_selected, nom_sel_norm, fmt)
+    out = build_top_bottom_response(
+        municipios, "ocupada", cve_selected, nom_sel_norm, fmt, ranking_size=ranking_size
+    )
     out["states"] = states
     if nacional:
         out["tabla_nacional"] = _fmt_row(nacional, False, "Estados Unidos Mexicanos", fields)
@@ -329,7 +340,7 @@ def build_instituciones_admin_response(conn, cve_selected: str, nom_sel_norm: st
 
 
 def build_unidades_medicas_response(conn, cve_selected: str, nom_sel_norm: str) -> Dict[str, Any]:
-    metrics: Sequence[MetricSpec] = [
+    metrics: List[MetricSpec] = [
         ("imss", ("imss", "IMSS"), "float"),
         ("issste", ("issste", "ISSSTE"), "float"),
         ("semar", ("semar", "SEMAR"), "float"),
@@ -337,10 +348,17 @@ def build_unidades_medicas_response(conn, cve_selected: str, nom_sel_norm: str) 
         ("sesa", ("sesa", "SESA"), "float"),
         ("ssa", ("ssa", "SSA"), "float"),
     ]
-    fields = ("imss", "issste", "semar", "imb", "sesa", "ssa")
+    # Fase 5: preferir columna ETL precalculada; fallback a suma en runtime.
+    col_total_etl = resolve_column(
+        conn, SCHEMA, T_TAB_MUNICIPAL, ("total_unidades_medicas",)
+    )
+    if col_total_etl:
+        metrics.append(("total_etl", ("total_unidades_medicas",), "float"))
+
     db_rows = _load_tab_municipal(conn, metrics)
     entity_row: Optional[Dict[str, Any]] = None
     municipios: List[Dict[str, Any]] = []
+    used_runtime_sum = 0
 
     for r in db_rows:
         nom = (r.get("nom_mun") or "").strip()
@@ -350,7 +368,12 @@ def build_unidades_medicas_response(conn, cve_selected: str, nom_sel_norm: str) 
         imb = _row_opt(r, ("imb",), "float") or 0.0
         sesa = _row_opt(r, ("sesa",), "float") or 0.0
         ssa = _row_opt(r, ("ssa",), "float") or 0.0
-        total = imss + issste + semar + imb + sesa + ssa
+        etl_total = _row_opt(r, ("total_etl",), "float") if col_total_etl else None
+        if etl_total is not None:
+            total = etl_total
+        else:
+            total = imss + issste + semar + imb + sesa + ssa
+            used_runtime_sum += 1
         row_data = {
             "imss": imss, "issste": issste, "semar": semar,
             "imb": imb, "sesa": sesa, "ssa": ssa, "total": total,
@@ -391,4 +414,10 @@ def build_unidades_medicas_response(conn, cve_selected: str, nom_sel_norm: str) 
 
     out = build_top_bottom_response(municipios, "total", cve_selected, nom_sel_norm, fmt)
     out["entidad"] = entity_row
+    out["etl"] = {
+        "total_unidades_medicas": "ready" if col_total_etl and used_runtime_sum == 0 else (
+            "partial" if col_total_etl else "missing_column"
+        ),
+        "runtime_fallback_rows": used_runtime_sum,
+    }
     return out

@@ -98,7 +98,9 @@ def _load_municipal_metric(
     return rows
 
 
-def build_escolaridad_response(conn, cve_selected: str, nom_sel_norm: str) -> Dict[str, Any]:
+def build_escolaridad_response(
+    conn, cve_selected: str, nom_sel_norm: str, *, ranking_size: int = 5
+) -> Dict[str, Any]:
     nat_rows, has_estatal = _load_tab_nacional(
         conn,
         [("graproes", ("graproes", "GRAPROES", "gra_proes", "GRA_PROES"))],
@@ -153,14 +155,18 @@ def build_escolaridad_response(conn, cve_selected: str, nom_sel_norm: str) -> Di
             "highlight": h,
         }
 
-    out = build_top_bottom_response(rows, "graproes", cve_selected, nom_sel_norm, fmt)
+    out = build_top_bottom_response(
+        rows, "graproes", cve_selected, nom_sel_norm, fmt, ranking_size=ranking_size
+    )
     out["states"] = states
     out["grap_nacional"] = grap_nacional
     out["grap_entidad"] = grap_entidad
     return out
 
 
-def build_analfabetismo_response(conn, cve_selected: str, nom_sel_norm: str) -> Dict[str, Any]:
+def build_analfabetismo_response(
+    conn, cve_selected: str, nom_sel_norm: str, *, ranking_size: int = 5
+) -> Dict[str, Any]:
     nat_rows, has_estatal = _load_tab_nacional(
         conn,
         [
@@ -229,7 +235,9 @@ def build_analfabetismo_response(conn, cve_selected: str, nom_sel_norm: str) -> 
             "highlight": h,
         }
 
-    out = build_top_bottom_response(rows, "tasa_an_red", cve_selected, nom_sel_norm, fmt)
+    out = build_top_bottom_response(
+        rows, "tasa_an_red", cve_selected, nom_sel_norm, fmt, ranking_size=ranking_size
+    )
     out["states"] = states
     out["tasa_nacional_2010"] = tasa_nacional_2010
     out["tasa_nacional_2020"] = tasa_nacional_2020

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from config_json_errors import ConfigJsonSyntaxError, load_json_object
 
 from visor_attribute_filter import parse_attribute_filter
 
@@ -58,8 +59,7 @@ def load_visor_catalog_raw() -> Dict[str, Any]:
     mtime = path.stat().st_mtime_ns
     if _catalog_cache is not None and _catalog_cache[0] == mtime:
         return _catalog_cache[1]
-    with path.open(encoding="utf-8") as fh:
-        data = json.load(fh)
+    data = load_json_object(path)
     if not isinstance(data, dict) or "layers" not in data:
         raise ValueError(f"Catálogo inválido en {path}: falta objeto 'layers'")
     _catalog_cache = (mtime, data)

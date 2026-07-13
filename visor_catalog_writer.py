@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from config_json_errors import verify_json_roundtrip
+
 from visor_catalog_loader import catalog_path, load_visor_catalog_raw, invalidate_visor_catalog_cache as clear_catalog_cache
 
 
@@ -47,6 +49,7 @@ def save_catalog(data: Dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     _write_backup(path)
+    verify_json_roundtrip(data)
     with tmp.open("w", encoding="utf-8") as fh:
         json.dump(data, fh, ensure_ascii=False, indent=2)
         fh.write("\n")

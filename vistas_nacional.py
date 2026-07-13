@@ -33,6 +33,7 @@ def build_states_ranking_vista(
     extra_nat_keys: Optional[Dict[str, Sequence[str]]] = None,
     response_key_states: str = "states",
     por_guerrero_col: Optional[Sequence[str]] = None,
+    ranking_size: int = 5,
 ) -> Dict[str, Any]:
     col_ent = resolve_column(conn, SCHEMA, T_TAB_NACIONAL, ("ent", "ENT", "cve_ent", "CVE_ENT"))
     col_nom_ent = resolve_column(conn, SCHEMA, T_TAB_NACIONAL, ("nom_ent", "NOM_ENT", "nomgeo", "NOMGEO"))
@@ -117,7 +118,7 @@ def build_states_ranking_vista(
         })
 
     out = build_top_bottom_response(
-        rows, mun_sort_alias, cve_selected, nom_sel_norm, row_formatter
+        rows, mun_sort_alias, cve_selected, nom_sel_norm, row_formatter, ranking_size=ranking_size
     )
     out[response_key_states] = states
     if por_guerrero_col:

@@ -844,6 +844,15 @@ def record_indexes_audit(user_id: int, table: str, result: Dict[str, Any]) -> No
     )
 
 
+# Acciones de Indicators Studio (no se listan en el registro del Visor).
+_INDICATOR_AUDIT_ACTIONS = (
+    "create_indicator",
+    "update_indicator",
+    "delete_indicator",
+    "replace_catalog",
+)
+
+
 def list_catalog_audit(
     *,
     limit: int = 50,
@@ -854,8 +863,8 @@ def list_catalog_audit(
 ) -> Dict[str, Any]:
     lim = max(1, min(int(limit or 50), 200))
     off = max(0, int(offset or 0))
-    clauses = ["1=1"]
-    params: List[Any] = []
+    clauses = ["a.action <> ALL(%s)"]
+    params: List[Any] = [list(_INDICATOR_AUDIT_ACTIONS)]
     if action:
         clauses.append("a.action = %s")
         params.append(action.strip())

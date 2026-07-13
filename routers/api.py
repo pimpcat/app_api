@@ -32,6 +32,18 @@ from vistas_tab_municipal import (
 from vistas_nacional import ent_key_to_int
 from visor_export import export_error_message, export_layer
 from visor_layers import layer_catalog, visor_catalog_payload
+from indicators_catalog_loader import indicators_catalog_path, indicators_catalog_payload
+from indicators_export import export_indicator
+from indicators_service import (
+    IndicatorError,
+    build_habitantes_policia_response,
+    build_indicator_payload,
+    validate_indicators_catalog,
+)
+from presentation_presets_loader import (
+    presentation_presets_path,
+    presentation_presets_payload,
+)
 from visor_tabular import (
     build_tabular_xlsx,
     fetch_tabular_data,
@@ -1013,32 +1025,7 @@ def instituciones_admin(cve_mun: Optional[str] = None, nom_mun: Optional[str] = 
 @router.get("/api/habitantes_por_policia_vista.php")
 def habitantes_policia(cve_mun: Optional[str] = None, nom_mun: Optional[str] = None):
     cve, nom = _sel_params(cve_mun, nom_mun)
-    with get_db() as conn:
-        rows = load_tab_municipal_rows(
-            conn,
-            [
-                ("habxpol", ("habxpol",), ""),
-                ("pob_tot", ("pob_tot", "pop_tot"), ""),
-                ("pol_prev", ("pol_prev",), ""),
-            ],
-        )
-    for r in rows:
-        hp = row_numeric(r, ("habxpol",), None)
-        if hp is None:
-            pol = row_numeric(r, ("pol_prev",), 0)
-            pob = row_numeric(r, ("pob_tot",), 0)
-            r["habxpol_eff"] = (pob / pol) if pol > 0 else 0
-        else:
-            r["habxpol_eff"] = hp
-
-    def fmt(r, h):
-        return {
-            "cve_mun": r["cve_mun"], "nom_mun": r["nom_mun"],
-            "habxpol": r.get("habxpol_eff", r.get("habxpol")),
-            "pob_tot": r["pob_tot"], "pol_prev": r["pol_prev"], "highlight": h,
-        }
-
-    return build_top_bottom_response(rows, "habxpol_eff", cve, nom, fmt)
+    return build_habitantes_policia_response(cve, nom)
 
 
 # --- Indicadores / columnas ---
@@ -1440,6 +1427,136 @@ def visor_catalog():
             detail={"ok": False, "error": "CATALOG_LOAD_FAILED", "message": str(exc)},
         ) from exc
     return {"ok": True, **payload}
+
+
+@router.get("/indicators/catalog")
+@router.get("/api/indicators/catalog")
+def indicators_catalog():
+    """Catálogo data-driven de indicadores del dashboard (sociodemografía, vivienda, economía, gobierno).
+
+    Fase 1: sirve el JSON validado. El menú y las vistas siguen usando el flujo legacy.
+    """
+    try:
+        payload = indicators_catalog_payload()
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"ok": False, "error": "CATALOG_LOAD_FAILED", "message": str(exc)},
+        ) from exc
+    return {"ok": True, **payload}
+
+
+@router.get("/indicators/presentation-presets")
+@router.get("/api/indicators/presentation-presets")
+def indicators_presentation_presets():
+    """Catálogo de presets de presentación (Fase 7). Contrato de estilos de gráficas/tablas."""
+    try:
+        payload = presentation_presets_payload()
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"ok": False, "error": "PRESETS_LOAD_FAILED", "message": str(exc)},
+        ) from exc
+    return {"ok": True, "presets_path": presentation_presets_path(), **payload}
+
+
+@router.get("/indicators/validate")
+@router.get("/api/indicators/validate")
+def indicators_validate():
+    """Cruza fields del catálogo con columnas reales en BD (information_schema).
+
+    Fase 2: diagnóstico para ETL / normalización. No altera datos.
+    """
+    try:
+        report = validate_indicators_catalog()
+        report["catalog_path"] = indicators_catalog_path()
+        return report
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"ok": False, "error": "CATALOG_LOAD_FAILED", "message": str(exc)},
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"ok": False, "error": "VALIDATE_FAILED", "message": str(exc)},
+        ) from exc
+
+
+@router.get("/indicators/{indicator_id}")
+@router.get("/api/indicators/{indicator_id}")
+def indicators_by_id(
+    indicator_id: str,
+    cve_mun: Optional[str] = None,
+    nom_mun: Optional[str] = None,
+):
+    """API unificada de indicadores del dashboard (Fase 2).
+
+    Despacha por ``indicator_id`` del catálogo hacia el mismo builder que la ruta legacy.
+    Respuesta = payload legacy + metadatos (``indicator_id``, ``response_profile``, ``template``, …).
+    Las rutas ``/api/comparativas/*`` y ``/api/vistas/*`` siguen disponibles como alias.
+    """
+    # Segmentos estáticos ya tienen rutas propias; evitar capturarlos aquí.
+    if indicator_id in ("catalog", "validate", "presentation-presets"):
+        raise HTTPException(
+            status_code=404,
+            detail={"ok": False, "error": "UNKNOWN_INDICATOR", "message": f"Indicador desconocido: {indicator_id}"},
+        )
+    try:
+        return build_indicator_payload(indicator_id, cve_mun, nom_mun)
+    except IndicatorError as exc:
+        raise HTTPException(
+            status_code=exc.status,
+            detail={"ok": False, "error": exc.code, "message": exc.message},
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"ok": False, "error": "QUERY_FAILED", "message": str(exc)},
+        ) from exc
+
+
+@router.get("/indicators/{indicator_id}/export")
+@router.get("/api/indicators/{indicator_id}/export")
+def indicators_export(
+    indicator_id: str,
+    format: str = Query("xlsx"),
+    cve_mun: Optional[str] = None,
+    nom_mun: Optional[str] = None,
+):
+    """Exporta un indicador a CSV o XLSX (openpyxl) — Fase 4.
+
+    Misma fuente de datos que ``GET /api/indicators/{id}``. PNG sigue siendo
+    captura en el cliente (html2canvas).
+    """
+    if indicator_id in ("catalog", "validate", "presentation-presets"):
+        raise HTTPException(
+            status_code=404,
+            detail={"ok": False, "error": "UNKNOWN_INDICATOR", "message": f"Indicador desconocido: {indicator_id}"},
+        )
+    try:
+        data, filename, media_type = export_indicator(
+            indicator_id, format, cve_mun, nom_mun
+        )
+    except IndicatorError as exc:
+        raise HTTPException(
+            status_code=exc.status,
+            detail={"ok": False, "error": exc.code, "message": exc.message},
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"ok": False, "error": "EXPORT_FAILED", "message": str(exc)},
+        ) from exc
+
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.get("/visor/search")
