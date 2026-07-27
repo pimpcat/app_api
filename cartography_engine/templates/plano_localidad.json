@@ -1,0 +1,386 @@
+{
+  "id": "plano_localidad",
+  "product": "plano_localidad",
+  "router": "plano_localidad",
+  "description": "Alias API: el motor elige plano_localidad_rural (PLR) o plano_localidad_urbana (PLU) según ámbito.",
+  "title": "PLANO DE LOCALIDAD {ambito}",
+  "footer": "GroSIG Cartography · Marco geoestadístico · {cve_mun}-{cve_loc}",
+  "layout": {
+      "preset": "grosig_localidad",
+    "paper": "dcarta_42x28",
+    "orientation": "landscape",
+    "strip": { "enabled": true, "ratio": 0.10 },
+    "legend": { "enabled": false },
+    "north": { "enabled": false },
+    "scale_bar": { "enabled": false },
+    "show_brand_header": false
+  },
+  "layers": [
+    {
+      "id": "colindantes",
+      "label": "AGEB rural colindante",
+      "table": "aux.colindantes",
+      "geometry": "line",
+      "optional": true,
+      "clip_to_localidad": true,
+      "filter": { "cve_mun": "{cve_mun}" },
+      "limit": 200,
+      "legend": true,
+      "symbol": { "type": "line", "stroke": "#757575", "width": 1.1, "dash": [6, 2, 1.5, 2] }
+    },
+    {
+      "id": "manzanas",
+      "label": "Manzana",
+      "table": "marco.m",
+      "geometry": "polygon",
+      "filter": { "cve_mun": "{cve_mun}", "cve_loc": "{cve_loc}" },
+      "clip_to_localidad": true,
+      "limit": 20000,
+      "labels": {
+        "enabled": true,
+        "field": "cve_mza",
+        "limit": 200,
+        "color": "#1a1a1a",
+        "bold": true,
+        "size": 6.0,
+        "anchor": "center"
+      },
+      "symbol": {
+        "type": "polygon",
+        "fill": "#FFFFFF",
+        "fill_opacity": 0.0,
+        "stroke": "#757575",
+        "width": 0.4
+      }
+    },
+    {
+      "id": "ejes",
+      "label": "Eje de vialidad",
+      "table": "marco.e",
+      "geometry": "line",
+      "filter": { "cve_mun": "{cve_mun}", "cve_loc": "{cve_loc}" },
+      "limit": 8000,
+      "optional": true,
+      "draw": false,
+      "legend": false,
+      "labels": {
+        "enabled": true,
+        "field": "nomvial",
+        "suffix_field": "cvevial",
+        "format": "paren",
+        "along": true,
+        "limit": 320,
+        "color": "#1a1a1a",
+        "bold": true,
+        "size": 4.8
+      },
+      "symbol": { "type": "none" }
+    },
+    {
+      "id": "sil_carretera",
+      "label": "Carretera",
+      "table": "marco.sil",
+      "geometry": "line",
+      "filter": {
+        "cve_mun": "{cve_mun}",
+        "cve_loc": "{cve_loc}",
+        "geografico": ["Carretera"]
+      },
+      "limit": 5000,
+      "optional": true,
+      "labels": {
+        "enabled": true,
+        "field": "geografico",
+        "along": true,
+        "limit": 20,
+        "color": "#000000",
+        "bold": true,
+        "size": 5.5
+      },
+      "symbol": {
+        "type": "line",
+        "stroke": "#212121",
+        "width": 1.55,
+        "decoration": "double"
+      }
+    },
+    {
+      "id": "sil_canal",
+      "label": "Canal",
+      "table": "marco.sil",
+      "geometry": "line",
+      "filter": {
+        "cve_mun": "{cve_mun}",
+        "cve_loc": "{cve_loc}",
+        "geografico": ["Canal"]
+      },
+      "limit": 5000,
+      "optional": true,
+      "labels": {
+        "enabled": true,
+        "field": "geografico",
+        "along": true,
+        "limit": 20,
+        "color": "#000000",
+        "bold": true,
+        "size": 5.5
+      },
+      "symbol": {
+        "type": "line",
+        "stroke": "#73DEFF",
+        "width": 1.05,
+        "dash": [4, 2.2]
+      }
+    },
+    {
+      "id": "sil_corriente",
+      "label": "Corriente de Agua",
+      "table": "marco.sil",
+      "geometry": "line",
+      "filter": {
+        "cve_mun": "{cve_mun}",
+        "cve_loc": "{cve_loc}",
+        "geografico": [
+          "Corriente de Agua",
+          "Corriente",
+          "Arroyo",
+          "Río",
+          "Rio",
+          "Barranca"
+        ]
+      },
+      "limit": 10000,
+      "optional": true,
+      "labels": {
+        "enabled": true,
+        "field": "geografico",
+        "along": true,
+        "limit": 40,
+        "color": "#000000",
+        "bold": true,
+        "size": 5.5
+      },
+      "symbol": { "type": "line", "stroke": "#1565C0", "width": 1.4 }
+    },
+    {
+      "id": "sia_industrial",
+      "label": "Instalación Industrial",
+      "table": "marco.sia",
+      "geometry": "polygon",
+      "filter": {
+        "cve_mun": "{cve_mun}",
+        "cve_loc": "{cve_loc}",
+        "geografico": ["Instalación Industrial"]
+      },
+      "limit": 2000,
+      "optional": true,
+      "symbol": {
+        "type": "polygon",
+        "fill": "#F9A825",
+        "fill_opacity": 0.85,
+        "stroke": "#F57F17",
+        "width": 0.45
+      }
+    },
+    {
+      "id": "sia_diversa",
+      "label": "Instalación Diversa",
+      "table": "marco.sia",
+      "geometry": "polygon",
+      "filter": {
+        "cve_mun": "{cve_mun}",
+        "cve_loc": "{cve_loc}",
+        "geografico": ["Instalación Diversa"]
+      },
+      "limit": 2000,
+      "optional": true,
+      "symbol": {
+        "type": "polygon",
+        "fill": "#FFFFFF",
+        "fill_opacity": 0.0,
+        "stroke": "#C2185B",
+        "width": 1.35
+      }
+    },
+    {
+      "id": "sia_cementerio",
+      "label": "Cementerio",
+      "table": "marco.sia",
+      "geometry": "polygon",
+      "filter": {
+        "cve_mun": "{cve_mun}",
+        "cve_loc": "{cve_loc}",
+        "geografico": ["Cementerio"]
+      },
+      "limit": 2000,
+      "optional": true,
+      "symbol": {
+        "type": "polygon",
+        "fill": "#FFFFFF",
+        "fill_opacity": 1.0,
+        "stroke": "#212121",
+        "width": 0.7
+      }
+    },
+    {
+      "id": "sia_deportiva",
+      "label": "Instalación Deportiva o Recreativa",
+      "table": "marco.sia",
+      "geometry": "polygon",
+      "filter": {
+        "cve_mun": "{cve_mun}",
+        "cve_loc": "{cve_loc}",
+        "geografico": ["Instalación Deportiva o Recreativa"]
+      },
+      "limit": 2000,
+      "optional": true,
+      "symbol": {
+        "type": "polygon",
+        "fill": "#A5D6A7",
+        "fill_opacity": 0.75,
+        "stroke": "#2E7D32",
+        "width": 0.5,
+        "hatch": true
+      }
+    },
+    {
+      "id": "sia_agua",
+      "label": "Cuerpo de Agua",
+      "table": "marco.sia",
+      "geometry": "polygon",
+      "filter": {
+        "cve_mun": "{cve_mun}",
+        "cve_loc": "{cve_loc}",
+        "geografico": ["Cuerpo de Agua"]
+      },
+      "limit": 2000,
+      "optional": true,
+      "symbol": {
+        "type": "polygon",
+        "fill": "#81D4FA",
+        "fill_opacity": 0.85,
+        "stroke": "#0288D1",
+        "width": 0.45
+      }
+    },
+    {
+      "id": "sia_otros",
+      "label": "SIA (otros)",
+      "table": "marco.sia",
+      "geometry": "polygon",
+      "filter": {
+        "cve_mun": "{cve_mun}",
+        "cve_loc": "{cve_loc}",
+        "geografico": [
+          "Aeródromo Civil",
+          "Camellón",
+          "Centro de Asistencia Médica",
+          "Escuela",
+          "Instalación de Servicios",
+          "Pista de Aviación",
+          "Plaza",
+          "Subestación Eléctrica",
+          "Templo",
+          "Zona Arqueológica"
+        ]
+      },
+      "limit": 5000,
+      "optional": true,
+      "symbol": {
+        "type": "polygon",
+        "fill": "#FFFFFF",
+        "fill_opacity": 0.0,
+        "stroke": "#212121",
+        "width": 0.85
+      }
+    },
+    {
+      "id": "ageb",
+      "label": "AGEB urbano",
+      "table": "marco.a",
+      "geometry": "line",
+      "filter": {
+        "cve_mun": "{cve_mun}",
+        "cve_loc": "{cve_loc}",
+        "ambito": ["U", "Urbana", "URBANO", "Urbano"]
+      },
+      "clip_to_localidad": true,
+      "limit": 400,
+      "optional": true,
+      "labels": {
+        "enabled": true,
+        "field": "cve_ageb",
+        "limit": 40,
+        "color": "#C62828",
+        "bold": true,
+        "size": 8.5,
+        "style": "ageb_oval",
+        "anchor": "center"
+      },
+      "symbol": { "type": "line", "stroke": "#C62828", "width": 0.95 }
+    },
+    {
+      "id": "pe",
+      "label": "Polígono envolvente",
+      "table": "marco.pe",
+      "geometry": "polygon",
+      "filter": { "cve_mun": "{cve_mun}", "cve_loc": "{cve_loc}" },
+      "limit": 40,
+      "optional": true,
+      "symbol": {
+        "type": "polygon",
+        "fill": "#FFFFFF",
+        "fill_opacity": 0.0,
+        "stroke": "#616161",
+        "width": 1.1
+      }
+    },
+    {
+      "id": "localidad",
+      "label": "Localidad",
+      "table": "marco.l",
+      "geometry": "line",
+      "filter": { "cve_mun": "{cve_mun}", "cve_loc": "{cve_loc}" },
+      "limit": 10,
+      "symbol": { "type": "line", "stroke": "#C62828", "width": 1.55, "dash": [8, 4] }
+    },
+    {
+      "id": "cd",
+      "label": "Caserío disperso",
+      "table": "marco.cd",
+      "geometry": "point",
+      "filter": { "cve_mun": "{cve_mun}", "cve_loc": "{cve_loc}" },
+      "limit": 5000,
+      "optional": true,
+      "legend": true,
+      "labels": {
+        "enabled": true,
+        "field": "cve_mza",
+        "limit": 500,
+        "color": "#424242",
+        "bold": true,
+        "size": 6.5,
+        "anchor": "offset"
+      },
+      "symbol": {
+        "type": "point",
+        "fill": "#FFFFFF",
+        "stroke": "#424242",
+        "size": 8.0,
+        "marker": "triangle"
+      }
+    },
+    {
+      "id": "sip",
+      "label": "Servicios puntuales",
+      "table": "marco.sip",
+      "geometry": "point",
+      "filter": { "cve_mun": "{cve_mun}", "cve_loc": "{cve_loc}" },
+      "clip_to_localidad": true,
+      "limit": 5000,
+      "optional": true,
+      "legend": false,
+      "symbol": { "type": "point", "fill": "#455A64", "stroke": "#455A64", "size": 2.8 }
+    }
+  ]
+}

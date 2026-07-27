@@ -1,0 +1,40 @@
+{
+  "id": "demo_blank",
+  "product": "demo_blank",
+  "title": "GroSIG Cartography Engine — Demo",
+  "footer": "Producto de prueba · PDF vectorial · independiente del visor web",
+  "demo_scale": 50000,
+  "description": "Plantilla sintética para validar layout, norte, escala, marco y leyenda.",
+  "layout": {
+    "preset": "default",
+    "paper": "letter",
+    "orientation": "portrait"
+  },
+  "layers": [
+    {
+      "id": "demo_poly",
+      "label": "Área de prueba",
+      "table": "c_mun",
+      "legend": true,
+      "symbol": {
+        "type": "polygon",
+        "fill_color": "#D9E8F5",
+        "fill_opacity": 0.6,
+        "stroke_color": "#1F4E79",
+        "stroke_width": 1.5
+      }
+    },
+    {
+      "id": "demo_pts",
+      "label": "Puntos de prueba",
+      "table": "c_loc_punto",
+      "legend": true,
+      "symbol": {
+        "type": "point",
+        "fill_color": "#C0392B",
+        "stroke_color": "#FFFFFF",
+        "size": 3.5
+      }
+    }
+  ]
+}

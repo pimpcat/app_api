@@ -46,14 +46,36 @@ def get_settings():
     elif not db_name:
         db_name = database_name_from_url(db_url)
 
+    carto_url = os.getenv("CARTOGRAPHY_DATABASE_URL", "").strip()
+    carto_name = os.getenv("CARTOGRAPHY_DB_NAME", "GroSIG_Cartography").strip() or (
+        "GroSIG_Cartography"
+    )
+    if not carto_url:
+        user = os.getenv("DB_USER", "postgres")
+        password = os.getenv("DB_PASSWORD", "")
+        host = os.getenv("DB_HOST", "db_mapas")
+        port = os.getenv("DB_PORT", "5432")
+        # Misma instancia Postgres; BD distinta del Atlas.
+        carto_url = f"postgresql://{user}:{password}@{host}:{port}/{carto_name}"
+
     return {
         "database_url": db_url,
         "database_name": db_name or database_name_from_url(db_url),
         "schema": os.getenv("ATLAS_SCHEMA", "atlas").strip() or "atlas",
+        "cartography_database_url": carto_url,
+        "cartography_database_name": carto_name
+        or database_name_from_url(carto_url)
+        or "GroSIG_Cartography",
         "jwt_secret": os.getenv("JWT_SECRET", "").strip(),
         "jwt_expire_hours": int(os.getenv("JWT_EXPIRE_HOURS", "8") or "8"),
         "cors_origins": _parse_cors_origins(),
         "enable_api_docs": os.getenv("ENABLE_API_DOCS", "false").strip().lower()
+        in ("1", "true", "yes", "on"),
+        "cartography_engine_enabled": os.getenv(
+            "CARTOGRAPHY_ENGINE_ENABLED", "false"
+        )
+        .strip()
+        .lower()
         in ("1", "true", "yes", "on"),
     }
 

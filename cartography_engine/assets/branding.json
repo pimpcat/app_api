@@ -1,0 +1,10 @@
+{
+  "brand_line": "CESIEG Guerrero",
+  "engine_line": "GroSIG Cartography Engine",
+  "logos": [
+    "cesieg.png"
+  ],
+  "fallback_labels": [
+    "CESIEG"
+  ]
+}

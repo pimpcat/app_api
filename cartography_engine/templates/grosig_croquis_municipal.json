@@ -1,0 +1,538 @@
+{
+  "id": "grosig_croquis_municipal",
+  "product": "grosig_croquis_municipal",
+  "title": "CROQUIS MUNICIPAL CON MARCO GEOESTADÍSTICO",
+  "footer": "GroSIG Cartography · Croquis municipal · {cve_mun} · CRS {crs}",
+  "layout": {
+    "preset": "grosig_croquis_90x70",
+    "paper": "plotter_90x70",
+    "orientation": "landscape",
+    "legend": { "enabled": true, "width": 260 },
+    "north": { "enabled": false },
+    "scale_bar": { "enabled": false }
+  },
+  "layers": [
+    {
+      "id": "municipio",
+      "label": "Área municipio",
+      "table": "mgn.municipios_a",
+      "geometry": "polygon",
+      "filter": { "cve_mun": "{cve_mun}" },
+      "limit": 5,
+      "legend": false,
+      "symbol": {
+        "type": "polygon",
+        "fill": "#FFFFFF",
+        "fill_opacity": 0.0,
+        "stroke": "#FFFFFF",
+        "width": 0.0
+      }
+    },
+    {
+      "id": "ctx_municipio_limite",
+      "label": "Límite municipal (vecinos)",
+      "table": "mgn.municipios_l",
+      "geometry": "line",
+      "limit": 80,
+      "optional": true,
+      "legend": false,
+      "symbol": {
+        "type": "line",
+        "stroke": "#24C200",
+        "width": 2.8,
+        "dash": [14, 10]
+      }
+    },
+    {
+      "id": "estados_l",
+      "label": "Límite estatal",
+      "table": "mgn.estados_l",
+      "geometry": "line",
+      "limit": 80,
+      "optional": true,
+      "legend": false,
+      "symbol": {
+        "type": "line",
+        "stroke": "#CC0000",
+        "width": 1.5,
+        "decoration": "cross"
+      }
+    },
+    {
+      "id": "entidad",
+      "label": "Entidad federativa",
+      "table": "mgn.estados_a",
+      "geometry": "polygon",
+      "draw": false,
+      "limit": 5,
+      "optional": true,
+      "legend": false,
+      "labels": {
+        "enabled": true,
+        "field": "nomgeo",
+        "prefix_field": "cve_ent",
+        "format": "newline",
+        "case": "title",
+        "limit": 3,
+        "color": "#CC0000",
+        "bold": true,
+        "size": 18.0,
+        "anchor": "center"
+      },
+      "symbol": {
+        "type": "polygon",
+        "fill": "#FFFFFF",
+        "fill_opacity": 0.0,
+        "stroke": "#FFFFFF",
+        "width": 0.0
+      }
+    },
+    {
+      "id": "ctx_municipios",
+      "label": "Municipio (vecinos)",
+      "table": "mgn.municipios_a",
+      "geometry": "polygon",
+      "draw": false,
+      "limit": 30,
+      "optional": true,
+      "legend": false,
+      "labels": {
+        "enabled": true,
+        "field": "nomgeo",
+        "prefix_field": "cve_mun",
+        "format": "newline",
+        "limit": 25,
+        "color": "#24C200",
+        "bold": true,
+        "size": 14.0,
+        "anchor": "center"
+      },
+      "symbol": {
+        "type": "polygon",
+        "fill": "#FFFFFF",
+        "fill_opacity": 0.0,
+        "stroke": "#FFFFFF",
+        "width": 0.0
+      }
+    },
+    {
+      "id": "ctx_corrientes",
+      "label": "Corriente perenne (vecinos)",
+      "table": "info50k.corrientes_agua_l",
+      "geometry": "line",
+      "filter_exclude": { "condicion": "INTERMITENTE" },
+      "limit": 4000,
+      "optional": true,
+      "legend": false,
+      "labels": {
+        "enabled": true,
+        "field": "nombre",
+        "along": true,
+        "limit": 30,
+        "color": "#00FFFF",
+        "bold": false,
+        "italic": true,
+        "case": "title",
+        "size": 6.5
+      },
+      "symbol": { "type": "line", "stroke": "#00FFFF", "width": 1.0 }
+    },
+    {
+      "id": "ctx_localidades_urbana",
+      "label": "Localidad urbana (vecinos)",
+      "table": "mgn.localidades_a",
+      "geometry": "polygon",
+      "filter": { "ambito": "Urbana" },
+      "limit": 2000,
+      "optional": true,
+      "legend": false,
+      "labels": {
+        "enabled": true,
+        "field": "nomgeo",
+        "prefix_field": "cve_loc",
+        "format": "newline",
+        "case": "title",
+        "limit": 120,
+        "color": "#1a1a1a",
+        "bold": true,
+        "size": 8.5,
+        "anchor": "center"
+      },
+      "symbol": {
+        "type": "polygon",
+        "fill": "#FFF59D",
+        "fill_opacity": 1.0,
+        "stroke": "#B2B2B2",
+        "width": 0.9
+      }
+    },
+    {
+      "id": "ctx_localidades_rural",
+      "label": "Localidad rural amanzanada (vecinos)",
+      "table": "mgn.localidades_a",
+      "geometry": "polygon",
+      "filter": { "ambito": "Rural" },
+      "limit": 2000,
+      "optional": true,
+      "legend": false,
+      "labels": {
+        "enabled": true,
+        "field": "nomgeo",
+        "prefix_field": "cve_loc",
+        "format": "newline",
+        "case": "title",
+        "limit": 80,
+        "color": "#424242",
+        "bold": false,
+        "size": 5.5,
+        "anchor": "center"
+      },
+      "symbol": {
+        "type": "polygon",
+        "fill": "#FFF59D",
+        "fill_opacity": 1.0,
+        "stroke": "#B2B2B2",
+        "width": 0.7,
+        "hatch": true
+      }
+    },
+    {
+      "id": "ctx_carreteras_doble",
+      "label": "Carretera doble (vecinos)",
+      "table": "info50k.carreteras_l",
+      "geometry": "line",
+      "filter": { "codigo_m": ["3865", "3867", "3868"] },
+      "limit": 15000,
+      "optional": true,
+      "legend": false,
+      "symbol": {
+        "type": "line",
+        "stroke": "#212121",
+        "width": 0.85,
+        "decoration": "double"
+      }
+    },
+    {
+      "id": "ctx_carreteras_dash",
+      "label": "Carretera cont/disc (vecinos)",
+      "table": "info50k.carreteras_l",
+      "geometry": "line",
+      "filter": { "codigo_m": "3866" },
+      "limit": 15000,
+      "optional": true,
+      "legend": false,
+      "symbol": {
+        "type": "line",
+        "stroke": "#212121",
+        "width": 0.72,
+        "dash": [5, 3],
+        "decoration": "double_dash"
+      }
+    },
+    {
+      "id": "ctx_carreteras_otra",
+      "label": "Carretera (vecinos)",
+      "table": "info50k.carreteras_l",
+      "geometry": "line",
+      "filter_exclude": { "codigo_m": ["3865", "3866", "3867", "3868"] },
+      "limit": 15000,
+      "optional": true,
+      "legend": false,
+      "symbol": { "type": "line", "stroke": "#212121", "width": 0.75 }
+    },
+    {
+      "id": "ctx_cuerpos",
+      "label": "Cuerpo de agua (vecinos)",
+      "table": "info50k.cuerpos_agua_a",
+      "geometry": "polygon",
+      "limit": 600,
+      "optional": true,
+      "legend": false,
+      "labels": {
+        "enabled": true,
+        "field": "nombre",
+        "limit": 40,
+        "color": "#00B3B3",
+        "bold": false,
+        "italic": true,
+        "case": "title",
+        "size": 5.5,
+        "anchor": "center"
+      },
+      "symbol": {
+        "type": "polygon",
+        "fill": "#80FFFF",
+        "fill_opacity": 0.45,
+        "stroke": "#00FFFF",
+        "width": 0.45
+      }
+    },
+    {
+      "id": "ageb_rural",
+      "label": "AGEB rural",
+      "table": "mgn.ageb_rurales_a",
+      "geometry": "polygon",
+      "filter": { "cve_mun": "{cve_mun}" },
+      "limit": 800,
+      "optional": true,
+      "labels": {
+        "enabled": true,
+        "field": "cve_ageb",
+        "limit": 400,
+        "color": "#FF0000",
+        "bold": true,
+        "size": 13.0,
+        "style": "ageb_oval"
+      },
+      "symbol": {
+        "type": "polygon",
+        "fill": "#FFFDE7",
+        "fill_opacity": 0.0,
+        "stroke": "#FFAA00",
+        "width": 2.6,
+        "dash": [10, 6]
+      }
+    },
+    {
+      "id": "corrientes",
+      "label": "Corriente perenne",
+      "table": "info50k.corrientes_agua_l",
+      "geometry": "line",
+      "clip_to_municipio": true,
+      "filter": { "cve_mun": "{cve_mun}" },
+      "filter_exclude": { "condicion": "INTERMITENTE" },
+      "limit": 4000,
+      "optional": true,
+      "labels": {
+        "enabled": true,
+        "field": "nombre",
+        "along": true,
+        "limit": 40,
+        "color": "#00FFFF",
+        "bold": false,
+        "italic": true,
+        "case": "title",
+        "size": 6.5
+      },
+      "symbol": { "type": "line", "stroke": "#00FFFF", "width": 1.1 }
+    },
+    {
+      "id": "cuerpos",
+      "label": "Cuerpo de agua perenne",
+      "table": "info50k.cuerpos_agua_a",
+      "geometry": "polygon",
+      "clip_to_municipio": true,
+      "filter": { "cve_mun": "{cve_mun}" },
+      "limit": 400,
+      "optional": true,
+      "labels": {
+        "enabled": true,
+        "field": "nombre",
+        "limit": 30,
+        "color": "#00B3B3",
+        "bold": false,
+        "italic": true,
+        "case": "title",
+        "size": 6.0,
+        "anchor": "center"
+      },
+      "symbol": {
+        "type": "polygon",
+        "fill": "#80FFFF",
+        "fill_opacity": 0.55,
+        "stroke": "#00FFFF",
+        "width": 0.5
+      }
+    },
+    {
+      "id": "localidades_urbana",
+      "label": "Localidad urbana",
+      "table": "mgn.localidades_a",
+      "geometry": "polygon",
+      "filter": { "cve_mun": "{cve_mun}", "ambito": "Urbana" },
+      "limit": 800,
+      "optional": true,
+      "labels": {
+        "enabled": true,
+        "field": "nomgeo",
+        "prefix_field": "cve_loc",
+        "format": "newline",
+        "case": "title",
+        "limit": 80,
+        "color": "#1a1a1a",
+        "bold": true,
+        "size": 8.5,
+        "anchor": "center"
+      },
+      "symbol": {
+        "type": "polygon",
+        "fill": "#FFF59D",
+        "fill_opacity": 1.0,
+        "stroke": "#B2B2B2",
+        "width": 0.9
+      }
+    },
+    {
+      "id": "localidades_rural",
+      "label": "Localidad rural amanzanada",
+      "table": "mgn.localidades_a",
+      "geometry": "polygon",
+      "filter": { "cve_mun": "{cve_mun}", "ambito": "Rural" },
+      "limit": 800,
+      "optional": true,
+      "labels": {
+        "enabled": true,
+        "field": "nomgeo",
+        "prefix_field": "cve_loc",
+        "format": "newline",
+        "case": "title",
+        "limit": 60,
+        "color": "#424242",
+        "bold": false,
+        "size": 5.5,
+        "anchor": "center"
+      },
+      "symbol": {
+        "type": "polygon",
+        "fill": "#FFF59D",
+        "fill_opacity": 1.0,
+        "stroke": "#B2B2B2",
+        "width": 0.7,
+        "hatch": true
+      }
+    },
+    {
+      "id": "localidades_p",
+      "label": "Localidad rural (punto)",
+      "table": "mgn.localidades_p",
+      "geometry": "point",
+      "filter": { "cve_mun": "{cve_mun}" },
+      "limit": 4000,
+      "optional": true,
+      "labels": {
+        "enabled": true,
+        "field": "nomgeo",
+        "prefix_field": "cve_loc",
+        "format": "newline",
+        "limit": 220,
+        "color": "#212121",
+        "bold": false,
+        "size": 5.2,
+        "anchor": "center"
+      },
+      "symbol": {
+        "type": "point",
+        "fill": "#212121",
+        "stroke": "#212121",
+        "size": 2.0
+      }
+    },
+    {
+      "id": "carreteras_doble",
+      "label": "Carretera (doble)",
+      "table": "info50k.carreteras_l",
+      "geometry": "line",
+      "clip_to_municipio": true,
+      "filter": { "cve_mun": "{cve_mun}", "codigo_m": ["3865", "3867", "3868"] },
+      "limit": 4000,
+      "optional": true,
+      "simplify": 55,
+      "symbol": {
+        "type": "line",
+        "stroke": "#212121",
+        "width": 0.85,
+        "decoration": "double"
+      }
+    },
+    {
+      "id": "carreteras_dash",
+      "label": "Carretera (continua/discontinua)",
+      "table": "info50k.carreteras_l",
+      "geometry": "line",
+      "clip_to_municipio": true,
+      "filter": { "cve_mun": "{cve_mun}", "codigo_m": "3866" },
+      "limit": 4000,
+      "optional": true,
+      "simplify": 55,
+      "symbol": {
+        "type": "line",
+        "stroke": "#212121",
+        "width": 0.72,
+        "dash": [5, 3],
+        "decoration": "double_dash"
+      }
+    },
+    {
+      "id": "carreteras_otra",
+      "label": "Carretera",
+      "table": "info50k.carreteras_l",
+      "geometry": "line",
+      "clip_to_municipio": true,
+      "filter": { "cve_mun": "{cve_mun}", "codigo_m": ["3660", "3860"] },
+      "limit": 4000,
+      "optional": true,
+      "simplify": 55,
+      "symbol": { "type": "line", "stroke": "#212121", "width": 0.75 }
+    },
+    {
+      "id": "caminos",
+      "label": "Brecha",
+      "table": "info50k.caminos_brechas_50_l",
+      "geometry": "line",
+      "clip_to_municipio": true,
+      "filter": { "cve_mun": "{cve_mun}", "codigo": "3171" },
+      "limit": 10000,
+      "optional": true,
+      "simplify": 40,
+      "symbol": {
+        "type": "line",
+        "stroke": "#212121",
+        "width": 0.48,
+        "dash": [1.5, 2.2]
+      }
+    },
+    {
+      "id": "via_ferrea",
+      "label": "Ferrocarril",
+      "table": "info50k.via_ferrea_l",
+      "geometry": "line",
+      "clip_to_municipio": true,
+      "filter": { "cve_mun": "{cve_mun}" },
+      "limit": 300,
+      "optional": true,
+      "simplify": 40,
+      "symbol": {
+        "type": "line",
+        "stroke": "#212121",
+        "width": 0.75,
+        "decoration": "rail"
+      }
+    },
+    {
+      "id": "municipio_limite",
+      "label": "Límite municipal",
+      "table": "mgn.municipios_l",
+      "geometry": "line",
+      "filter": { "cve_mun": "{cve_mun}" },
+      "limit": 20,
+      "optional": true,
+      "symbol": {
+        "type": "line",
+        "stroke": "#24C200",
+        "width": 3.0,
+        "dash": [14, 10]
+      }
+    },
+    {
+      "id": "aeropuertos",
+      "label": "Aeropuerto",
+      "table": "info50k.aeropuertos_p",
+      "geometry": "point",
+      "clip_to_municipio": true,
+      "filter": { "cve_mun": "{cve_mun}" },
+      "limit": 20,
+      "optional": true,
+      "symbol": { "type": "point", "fill": "#1565C0", "stroke": "#0D47A1", "size": 4.0 }
+    }
+  ]
+}

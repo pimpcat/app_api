@@ -1,0 +1,56 @@
+{
+  "id": "croquis_municipal",
+  "product": "croquis_municipal",
+  "title": "Croquis municipal — {nomgeo}",
+  "footer": "GroSIG Cartography Engine · CVE {cve_mun} · {crs} · salida vectorial",
+  "description": "Croquis municipal 1.3: layout data-driven, capas, leyenda, etiquetas con colisión.",
+  "layout": {
+    "preset": "default",
+    "paper": "letter",
+    "orientation": "portrait",
+    "legend": { "enabled": true, "width": 118, "position": "right" },
+    "north": { "enabled": true },
+    "scale_bar": { "enabled": true },
+    "show_brand_header": true,
+    "show_outer_frame": true
+  },
+  "layers": [
+    {
+      "id": "municipio",
+      "label": "Límite municipal",
+      "table": "c_mun",
+      "geom_column": "the_geom",
+      "filter": { "cve_mun": "{cve_mun}" },
+      "limit": 1,
+      "legend": true,
+      "symbol": {
+        "type": "polygon",
+        "fill_color": "#D9E8F5",
+        "fill_opacity": 0.45,
+        "stroke_color": "#1F4E79",
+        "stroke_width": 1.4
+      }
+    },
+    {
+      "id": "localidades",
+      "label": "Localidades",
+      "table": "c_loc_punto",
+      "geom_column": "the_geom",
+      "filter": { "cve_mun": "{cve_mun}" },
+      "limit": 800,
+      "optional": true,
+      "legend": true,
+      "labels": {
+        "enabled": true,
+        "field": "nom_loc",
+        "limit": 40
+      },
+      "symbol": {
+        "type": "point",
+        "fill_color": "#B03A2E",
+        "stroke_color": "#FFFFFF",
+        "size": 3.2
+      }
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+# Dependencias del GroSIG Cartography Engine (Fase 0.1+).
+# Mantener liviano: geopandas/GDAL se posponen (rompen el Atlas).
+# GeoPDF 1.4 usa pikepdf (Adobe Measure/GPTS), no GDAL.
+reportlab>=4.0,<5
+shapely>=2.0,<3
+pyproj>=3.6,<4
+Pillow>=10.0,<12
+orjson>=3.9,<4
+pikepdf>=8.0,<10

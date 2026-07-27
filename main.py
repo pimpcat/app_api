@@ -45,6 +45,20 @@ try:
 except Exception as exc:
     logger.warning("Módulo ruteo no disponible (portal sigue operativo): %s", exc)
 
+if settings.get("cartography_engine_enabled"):
+    try:
+        from cartography_engine.router import router as cartography_router
+
+        app.include_router(cartography_router)
+        logger.info("GroSIG Cartography Engine habilitado (CARTOGRAPHY_ENGINE_ENABLED=true).")
+    except Exception as exc:
+        logger.warning(
+            "Cartography Engine no disponible (Atlas sigue operativo): %s",
+            exc,
+        )
+else:
+    logger.info("GroSIG Cartography Engine deshabilitado (CARTOGRAPHY_ENGINE_ENABLED=false).")
+
 try:
     from routers.admin_auth import router as admin_auth_router
     from routers.admin_users import router as admin_users_router
