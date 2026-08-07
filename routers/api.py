@@ -61,6 +61,8 @@ from spatial_analysis import (
     listar_capas_disponibles,
     listar_columnas_numericas,
 )
+from spatial_analysis_export import build_spatial_analysis_xlsx, spatial_export_filename
+
 
 router = APIRouter()
 
@@ -1191,6 +1193,12 @@ class AnalisisIntersectBody(BaseModel):
     cve_mun: Optional[str] = Field(None, description="Filtro municipal opcional (3 dígitos)")
 
 
+class AnalisisExportBody(BaseModel):
+    """Cuerpo POST /api/analisis/export: resultado ya calculado del modal."""
+
+    resultado: Dict[str, Any] = Field(..., description="Payload de POST /api/analisis/dinamico")
+
+
 @router.get("/analisis/capas")
 @router.get("/api/analisis/capas")
 def analisis_listar_capas():
@@ -1282,6 +1290,42 @@ def analisis_dinamico(body: AnalisisDinamicoBody):
                 "message": str(exc),
             },
         )
+
+
+@router.post("/analisis/export")
+@router.post("/api/analisis/export")
+def analisis_export(body: AnalisisExportBody):
+    """Exporta a Excel (openpyxl) el resultado ya mostrado en el modal del visor."""
+    try:
+        xlsx = build_spatial_analysis_xlsx(body.resultado or {})
+        filename = spatial_export_filename(body.resultado or {})
+    except ValueError as exc:
+        code = str(exc)
+        msg = {
+            "EXPORT_FAILED": "openpyxl no está disponible en el servidor.",
+            "RESULTADO_INVALIDO": "No hay resultado de análisis para exportar.",
+        }.get(code, str(exc))
+        raise HTTPException(
+            status_code=400,
+            detail={"ok": False, "error": code, "message": msg},
+        ) from exc
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": "EXPORT_FAILED",
+                "message": str(exc),
+            },
+        )
+    return Response(
+        content=xlsx,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 # --- Visor buffer (selección en mapa) ---

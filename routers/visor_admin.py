@@ -14,11 +14,13 @@ from visor_catalog_admin_service import (
     create_layer_from_payload,
     delete_catalog_group,
     delete_managed_layer,
+    drop_orphan_postgis_table,
     get_layer_admin_detail,
     list_catalog_audit,
     list_catalog_groups,
     list_managed_layers,
     list_publishable_tables,
+    list_publishable_tables_with_meta,
     list_table_columns,
     list_column_distinct_values,
     record_indexes_audit,
@@ -27,6 +29,7 @@ from visor_catalog_admin_service import (
     update_catalog_group_label,
     update_layer_from_payload,
     validate_new_layer,
+    wait_table_in_martin,
 )
 from visor_table_indexes import apply_table_indexes, build_index_plan, list_table_indexes
 
@@ -285,12 +288,27 @@ def _http_from_value_error(exc: ValueError) -> HTTPException:
     if raw.startswith("MARTIN_UNAVAILABLE:"):
         return HTTPException(
             status_code=503,
-            detail={"ok": False, "error": "MARTIN_UNAVAILABLE", "message": "Martin no responde"},
+            detail={"ok": False, "error": "MARTIN_UNAVAILABLE", "message": "El servicio de mapa no está disponible"},
         )
     if raw == "INVALID_TABLE" or raw == "TABLE_NOT_FOUND":
         return HTTPException(
             status_code=404,
-            detail={"ok": False, "error": raw, "message": "Tabla no encontrada en PostGIS"},
+            detail={"ok": False, "error": raw, "message": "Tabla no encontrada en la base de datos"},
+        )
+    if raw.startswith("INVALID_TABLE:"):
+        return HTTPException(
+            status_code=400,
+            detail={"ok": False, "error": "INVALID_TABLE", "message": raw.split(":", 1)[1]},
+        )
+    if raw.startswith("PROTECTED_TABLE:"):
+        return HTTPException(
+            status_code=403,
+            detail={"ok": False, "error": "PROTECTED_TABLE", "message": raw.split(":", 1)[1]},
+        )
+    if raw.startswith("TABLE_IN_CATALOG:"):
+        return HTTPException(
+            status_code=409,
+            detail={"ok": False, "error": "TABLE_IN_CATALOG", "message": raw.split(":", 1)[1]},
         )
     if raw == "TABLE_NOT_PUBLISHABLE":
         return HTTPException(
@@ -298,7 +316,7 @@ def _http_from_value_error(exc: ValueError) -> HTTPException:
             detail={
                 "ok": False,
                 "error": raw,
-                "message": "La tabla no está en Martin ni en el catálogo del visor",
+                "message": "La tabla no está disponible para el mapa ni en el catálogo del visor",
             },
         )
     if raw == "INVALID_IDENTIFIER":
@@ -429,10 +447,10 @@ def visor_admin_meta(_user: Dict[str, Any] = Depends(require_admin_user)) -> Dic
 @router.get("/tables")
 def visor_admin_tables(_user: Dict[str, Any] = Depends(require_admin_user)) -> Dict[str, Any]:
     try:
-        tables = list_publishable_tables()
+        payload = list_publishable_tables_with_meta()
     except RuntimeError as exc:
         raise _http_from_value_error(ValueError(str(exc))) from exc
-    return {"ok": True, "tables": tables}
+    return {"ok": True, **payload}
 
 
 @router.get("/tables/{table_name}/columns")
@@ -465,6 +483,31 @@ def visor_admin_table_status(table_name: str, _user: Dict[str, Any] = Depends(re
     except ValueError as exc:
         raise _http_from_value_error(exc) from exc
     return {"ok": True, **status}
+
+
+@router.post("/tables/{table_name}/wait-martin")
+async def visor_admin_wait_martin(
+    table_name: str,
+    timeout_s: Optional[float] = None,
+    _user: Dict[str, Any] = Depends(require_admin_user),
+) -> Dict[str, Any]:
+    """Espera a que Martin descubra la tabla (reload_interval); no reinicia el contenedor."""
+    import asyncio
+
+    try:
+        result = await asyncio.to_thread(wait_table_in_martin, table_name, timeout_s)
+    except ValueError as exc:
+        raise _http_from_value_error(exc) from exc
+    if result.get("in_martin"):
+        msg = f"Capa lista para el mapa ({result.get('waited_ms', 0)} ms)."
+    elif not result.get("martin_available"):
+        msg = "El servicio de mapa no está disponible. Espere unos segundos y compruebe de nuevo."
+    else:
+        msg = (
+            "La capa aún se está preparando para el mapa (~30 s). "
+            "Pulse Comprobar de nuevo si hace falta."
+        )
+    return {"ok": bool(result.get("in_martin")), **result, "message": msg}
 
 
 @router.get("/audit")
@@ -552,15 +595,34 @@ async def visor_admin_upload_shp(
     table_name: Optional[str] = Form(None),
     user: Dict[str, Any] = Depends(require_admin_user),
 ) -> Dict[str, Any]:
+    import asyncio
+
     content = await file.read()
     if len(content) > 80 * 1024 * 1024:
         raise HTTPException(status_code=413, detail={"ok": False, "error": "FILE_TOO_LARGE", "message": "Máx. 80 MB"})
     try:
-        result = import_shapefile(content, file.filename or "upload.shp", table_name)
+        result = await asyncio.to_thread(
+            import_shapefile,
+            content,
+            file.filename or "upload.shp",
+            table_name,
+        )
     except ValueError as exc:
         raise _http_from_value_error(exc) from exc
     except RuntimeError as exc:
         raise _http_from_runtime_error(exc) from exc
+    # No bloquear el event loop durante el poll a Martin (hasta ~100 s).
+    wait = await asyncio.to_thread(wait_table_in_martin, str(result.get("table") or ""))
+    result = {
+        **result,
+        "in_martin": bool(wait.get("in_martin")),
+        "pending_martin": bool(wait.get("pending_martin")),
+        "needs_martin_restart": bool(wait.get("needs_martin_restart")),
+        "waited_ms": wait.get("waited_ms"),
+        "martin_attempts": wait.get("attempts"),
+        "martin_available": wait.get("martin_available"),
+        "martin_timed_out": bool(wait.get("timed_out")),
+    }
     try:
         record_shp_import_audit(
             int(user["id"]),
@@ -571,10 +633,22 @@ async def visor_admin_upload_shp(
         )
     except (KeyError, TypeError, ValueError):
         pass
+    if result.get("in_martin"):
+        msg = "Shapefile importado y listo para el mapa. Puede publicar la capa."
+    elif not result.get("martin_available"):
+        msg = (
+            "Shapefile importado, pero el servicio de mapa no está disponible. "
+            "Use Comprobar de nuevo en el asistente."
+        )
+    else:
+        msg = (
+            "Shapefile importado. La capa aún se está preparando para el mapa; "
+            "el asistente seguirá comprobando automáticamente."
+        )
     return {
         "ok": True,
         **result,
-        "message": "Shapefile importado. Reinicie Martin antes de publicar la capa.",
+        "message": msg,
     }
 
 
@@ -676,15 +750,66 @@ def visor_admin_update_layer(
 
 
 @router.delete("/layers/{layer_id}")
-def visor_admin_delete_layer(
+async def visor_admin_delete_layer(
     layer_id: str,
+    drop_table: bool = False,
+    wait_martin: bool = False,
     user: Dict[str, Any] = Depends(require_admin_user),
 ) -> Dict[str, Any]:
+    import asyncio
+
     try:
-        result = delete_managed_layer(layer_id, int(user["id"]))
+        result = await asyncio.to_thread(
+            delete_managed_layer,
+            layer_id,
+            int(user["id"]),
+            drop_table=drop_table,
+            wait_martin=wait_martin,
+        )
     except ValueError as exc:
         raise _http_from_value_error(exc) from exc
-    return {"ok": True, **result, "message": "Capa despublicada del catálogo."}
+    if drop_table:
+        gone = (result.get("martin") or {}).get("gone_from_martin")
+        if gone:
+            msg = "Capa eliminada del visor y de la base de datos."
+        else:
+            msg = (
+                "Capa eliminada del visor y de la base de datos. "
+                "El mapa dejará de mostrarla en unos segundos."
+            )
+    else:
+        msg = "Capa quitada del visor (los datos se conservan)."
+    return {"ok": True, **result, "message": msg}
+
+
+@router.delete("/tables/{table_name}")
+async def visor_admin_drop_table(
+    table_name: str,
+    wait_martin: bool = False,
+    user: Dict[str, Any] = Depends(require_admin_user),
+) -> Dict[str, Any]:
+    """Borra una tabla huérfana (no publicada en catalog.json)."""
+    import asyncio
+
+    try:
+        result = await asyncio.to_thread(
+            drop_orphan_postgis_table,
+            table_name,
+            int(user["id"]),
+            wait_martin=wait_martin,
+        )
+    except ValueError as exc:
+        raise _http_from_value_error(exc) from exc
+    gone = (result.get("martin") or {}).get("gone_from_martin")
+    msg = (
+        "Tabla eliminada de la base de datos."
+        + (
+            " Ya no aparece en el mapa."
+            if gone
+            else " El mapa dejará de mostrarla en unos segundos."
+        )
+    )
+    return {**result, "message": msg}
 
 
 @router.post("/layers")

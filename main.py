@@ -59,18 +59,44 @@ if settings.get("cartography_engine_enabled"):
 else:
     logger.info("GroSIG Cartography Engine deshabilitado (CARTOGRAPHY_ENGINE_ENABLED=false).")
 
+if settings.get("geography_context_enabled"):
+    try:
+        from geography_context.router import router as geography_context_router
+
+        app.include_router(geography_context_router)
+        logger.info(
+            "GroSIG Geography Context habilitado (GEOGRAPHY_CONTEXT_ENABLED=true)."
+        )
+    except Exception as exc:
+        logger.warning(
+            "Geography Context no disponible (Atlas sigue operativo): %s",
+            exc,
+        )
+else:
+    logger.info(
+        "GroSIG Geography Context deshabilitado (GEOGRAPHY_CONTEXT_ENABLED=false)."
+    )
+
 try:
     from routers.admin_auth import router as admin_auth_router
     from routers.admin_users import router as admin_users_router
     from routers.visor_admin import router as visor_admin_router
     from routers.indicators_admin import router as indicators_admin_router
+    from routers.theme_admin import router as theme_admin_router
+    from routers.theme_public import router as theme_public_router
+    from data_refresh.router import router as data_refresh_router
+    from routers.admin_backups import router as admin_backups_router
 
     app.include_router(admin_auth_router)
     app.include_router(admin_users_router)
     app.include_router(visor_admin_router)
     app.include_router(indicators_admin_router)
+    app.include_router(theme_admin_router)
+    app.include_router(theme_public_router)
+    app.include_router(data_refresh_router)
+    app.include_router(admin_backups_router)
 except Exception as exc:
-    logger.warning("Módulo admin visor/indicadores no disponible: %s", exc)
+    logger.warning("Módulo admin visor/indicadores/tema/data-refresh no disponible: %s", exc)
 
 
 @app.get("/")

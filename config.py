@@ -77,6 +77,12 @@ def get_settings():
         .strip()
         .lower()
         in ("1", "true", "yes", "on"),
+        "geography_context_enabled": os.getenv(
+            "GEOGRAPHY_CONTEXT_ENABLED", "true"
+        )
+        .strip()
+        .lower()
+        in ("1", "true", "yes", "on"),
     }
 
 

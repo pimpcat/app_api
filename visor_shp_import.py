@@ -84,7 +84,21 @@ def _find_shp_file(folder: Path) -> Path:
     return shp_files[0]
 
 
-def _ogr2ogr_import(shp_path: Path, table: str, schema: str) -> None:
+def _ogr2ogr_import(
+    shp_path: Path,
+    table: str,
+    schema: str,
+    *,
+    nlt: str = "PROMOTE_TO_MULTI",
+) -> None:
+    """Importa SHP a PostGIS.
+
+    ``PRECISION=NO`` evita NUMERIC(width,scale) heredado del DBF (p. ej. latitud
+    con scale 17 y un solo dígito entero → overflow con valores como 16.75).
+
+    ``nlt``: p. ej. ``POINT`` (capas punto) o ``PROMOTE_TO_MULTI`` (línea/polígono).
+    """
+    nlt_val = (nlt or "PROMOTE_TO_MULTI").strip().upper() or "PROMOTE_TO_MULTI"
     conn = _pg_connection_string()
     qualified = f"{schema}.{table}"
     cmd = [
@@ -99,8 +113,10 @@ def _ogr2ogr_import(shp_path: Path, table: str, schema: str) -> None:
         "GEOMETRY_NAME=the_geom",
         "-lco",
         "FID=gid",
+        "-lco",
+        "PRECISION=NO",
         "-nlt",
-        "PROMOTE_TO_MULTI",
+        nlt_val,
         "-t_srs",
         "EPSG:3857",
         "-nln",
@@ -127,6 +143,17 @@ def _table_exists(schema: str, table: str) -> bool:
 
 
 def _geometry_type(schema: str, table: str) -> str:
+    """Familia lógica: point | line | polygon (Multi* cuenta como la familia)."""
+    detail = _geometry_type_detail(schema, table)
+    if "line" in detail:
+        return "line"
+    if "polygon" in detail:
+        return "polygon"
+    return "point"
+
+
+def _geometry_type_detail(schema: str, table: str) -> str:
+    """Tipo PostGIS normalizado: point, multipoint, line, multiline, polygon, multipolygon."""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -139,11 +166,17 @@ def _geometry_type(schema: str, table: str) -> str:
             row = cur.fetchone()
     if not row or not row.get("type"):
         return "point"
-    gtype = str(row["type"]).upper()
+    gtype = str(row["type"]).upper().replace(" ", "")
+    if "MULTILINE" in gtype:
+        return "multiline"
     if "LINE" in gtype:
         return "line"
+    if "MULTIPOLYGON" in gtype:
+        return "multipolygon"
     if "POLYGON" in gtype:
         return "polygon"
+    if "MULTIPOINT" in gtype:
+        return "multipoint"
     return "point"
 
 
@@ -214,6 +247,4 @@ def import_shapefile(
         "geometry": geometry,
         "columns": columns,
         "feature_count": count,
-        "needs_martin_restart": True,
-        "in_martin": False,
     }

@@ -34,6 +34,23 @@ CREATE INDEX IF NOT EXISTS idx_catalog_audit_created
 CREATE INDEX IF NOT EXISTS idx_catalog_audit_action
   ON atlas_admin.catalog_audit (action, created_at DESC);
 
+-- Jobs de Data Refresh Studio (ETL espacial)
+CREATE TABLE IF NOT EXISTS atlas_admin.data_refresh_jobs (
+  id            TEXT PRIMARY KEY,
+  user_id       INT REFERENCES atlas_admin.users(id),
+  target_table  TEXT NOT NULL,
+  staging_table TEXT,
+  status        TEXT NOT NULL,
+  report        JSONB,
+  error_message TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_data_refresh_jobs_created
+  ON atlas_admin.data_refresh_jobs (created_at DESC);
+
+
 CREATE TABLE IF NOT EXISTS atlas_admin.layer_publications (
   id               SERIAL PRIMARY KEY,
   layer_id         TEXT NOT NULL UNIQUE,

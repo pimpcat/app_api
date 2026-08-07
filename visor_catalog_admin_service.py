@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import urllib.error
-import urllib.request
 from typing import Any, Dict, List, Optional
 
 from config import get_settings
@@ -33,93 +30,188 @@ from visor_catalog_writer import (
     slug_group_id,
     update_group_label_entry,
 )
+from visor_martin_ready import fetch_martin_table_ids, wait_for_martin_table
 
 from auth.users import ADMIN_SCHEMA
 
-MARTIN_CATALOG_URL = os.getenv("MARTIN_CATALOG_URL", "http://martin:3000/catalog").strip()
-
-
-def _martin_catalog_layer_ids(catalog: Any) -> List[str]:
-    ids: List[str] = []
-    if isinstance(catalog, dict):
-        tiles = catalog.get("tiles")
-        if isinstance(tiles, dict):
-            ids.extend(str(k) for k in tiles.keys())
-        else:
-            ids.extend(str(k) for k in catalog.keys() if k not in ("tiles", "sprites", "fonts"))
-    elif isinstance(catalog, list):
-        for item in catalog:
-            if isinstance(item, dict) and item.get("id"):
-                ids.append(str(item["id"]))
-    return ids
-
-
-def fetch_martin_table_ids() -> List[str]:
-    try:
-        req = urllib.request.Request(
-            MARTIN_CATALOG_URL,
-            headers={"User-Agent": "AtlasGro/visor-admin"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            catalog = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as exc:
-        raise RuntimeError(f"MARTIN_UNAVAILABLE:{exc}") from exc
-    return sorted(
-        {
-            lid
-            for lid in _martin_catalog_layer_ids(catalog)
-            if lid.startswith("c_") or lid.startswith("v_c_")
-        }
-    )
-
 
 def fetch_postgis_vector_table_ids() -> List[str]:
-    """Tablas vectoriales c_* / v_c_* en PostGIS (aunque Martin aún no las liste)."""
+    """
+    Tablas/vistas c_* / v_c_* del esquema atlas **con geometría** (publicables en el visor).
+    Fuente principal: geometry_columns; refuerzo: columnas the_geom/geom/wkb_geometry.
+    """
+    settings = get_settings()
+    schema = settings.get("schema") or "atlas"
+    found: set[str] = set()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # 1) PostGIS: solo relaciones registradas con geometría
+            try:
+                cur.execute(
+                    """
+                    SELECT DISTINCT f_table_name AS table_name
+                      FROM geometry_columns
+                     WHERE f_table_schema = %s
+                       AND (
+                            f_table_name LIKE 'c\\_%%' ESCAPE '\\'
+                         OR f_table_name LIKE 'v\\_c\\_%%' ESCAPE '\\'
+                       )
+                    """,
+                    (schema,),
+                )
+                for r in cur.fetchall() or []:
+                    if r.get("table_name"):
+                        found.add(str(r["table_name"]).strip().lower())
+            except Exception as exc:
+                print(f"[visor-admin] geometry_columns: {exc}")
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
+            # 2) geography / columnas geom típicas no siempre en geometry_columns
+            try:
+                cur.execute(
+                    """
+                    SELECT DISTINCT c.table_name
+                      FROM information_schema.columns c
+                     WHERE c.table_schema = %s
+                       AND (
+                            c.table_name LIKE 'c\\_%%' ESCAPE '\\'
+                         OR c.table_name LIKE 'v\\_c\\_%%' ESCAPE '\\'
+                       )
+                       AND lower(c.column_name) IN ('the_geom', 'geom', 'wkb_geometry')
+                       AND (
+                            c.udt_name IN ('geometry', 'geography')
+                         OR c.data_type IN ('USER-DEFINED')
+                       )
+                    """,
+                    (schema,),
+                )
+                for r in cur.fetchall() or []:
+                    if r.get("table_name"):
+                        found.add(str(r["table_name"]).strip().lower())
+            except Exception as exc:
+                print(f"[visor-admin] info_schema geom cols: {exc}")
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+    return sorted(found)
+
+
+def postgis_relation_exists(table: str) -> bool:
+    """True si atlas.<table> existe (tabla/vista/matview)."""
+    name = (table or "").strip().lower()
+    if not name or not name.replace("_", "").isalnum():
+        return False
     settings = get_settings()
     schema = settings.get("schema") or "atlas"
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT DISTINCT f_table_name AS table_name
-                  FROM geometry_columns
-                 WHERE f_table_schema = %s
-                   AND (f_table_name LIKE 'c\\_%' ESCAPE '\\'
-                        OR f_table_name LIKE 'v\\_c\\_%' ESCAPE '\\')
-                 ORDER BY 1
-                """,
-                (schema,),
-            )
-            rows = cur.fetchall()
-    return [str(r["table_name"]).strip() for r in rows if r.get("table_name")]
+            cur.execute("SELECT to_regclass(%s) AS reg", (f"{schema}.{name}",))
+            row = cur.fetchone()
+    return bool(row and row.get("reg"))
 
 
 def list_publishable_tables() -> List[Dict[str, Any]]:
-    """Tablas disponibles para publicar: en Martin y/o PostGIS, excluyendo las ya en catalog.json."""
+    """
+    Candidatas a publicar:
+    - Existen en PostGIS (c_*/v_c_*) **con geometría**, o Martin + confirmación to_regclass.
+    - No referenciadas en catalog.json (data.table).
+    - Sin fantasmas solo-Martin ni tablas sin geometría.
+    """
+    martin_ok = True
     try:
         martin_ids = {t.lower() for t in fetch_martin_table_ids()}
     except RuntimeError:
+        martin_ok = False
         martin_ids = set()
     try:
         postgis_ids = {t.lower() for t in fetch_postgis_vector_table_ids()}
-    except Exception:
+    except Exception as exc:
+        print(f"[visor-admin] fetch_postgis_vector_table_ids: {exc}")
         postgis_ids = set()
+
+    for mid in list(martin_ids):
+        if mid in postgis_ids:
+            continue
+        try:
+            if postgis_relation_exists(mid):
+                postgis_ids.add(mid)
+        except Exception:
+            pass
+
     used = catalog_table_names()
     out: List[Dict[str, Any]] = []
-    for table in sorted(martin_ids | postgis_ids):
+    for table in sorted(postgis_ids):
         if table in used:
             continue
         in_martin = table in martin_ids
+        pending = (not in_martin) and martin_ok
         out.append(
             {
                 "table": table,
                 "label": table,
                 "in_martin": in_martin,
-                "in_postgis": table in postgis_ids,
-                "needs_martin_restart": not in_martin and table in postgis_ids,
+                "in_postgis": True,
+                "pending_martin": pending,
+                "needs_martin_restart": (not martin_ok),
             }
         )
     return out
+
+
+def list_publishable_tables_with_meta() -> Dict[str, Any]:
+    """Listado + contadores para el wizard."""
+    martin_ok = True
+    try:
+        martin_ids = {t.lower() for t in fetch_martin_table_ids()}
+    except RuntimeError:
+        martin_ok = False
+        martin_ids = set()
+    try:
+        postgis_ids = set(fetch_postgis_vector_table_ids())
+    except Exception:
+        postgis_ids = set()
+    for mid in list(martin_ids):
+        if mid not in postgis_ids:
+            try:
+                if postgis_relation_exists(mid):
+                    postgis_ids.add(mid)
+            except Exception:
+                pass
+    used = catalog_table_names()
+    ghosts = sorted(m for m in martin_ids if m not in postgis_ids)
+    blocked = sorted(postgis_ids & used)
+    tables = []
+    for table in sorted(postgis_ids):
+        if table in used:
+            continue
+        in_martin = table in martin_ids
+        tables.append(
+            {
+                "table": table,
+                "label": table,
+                "in_martin": in_martin,
+                "in_postgis": True,
+                "pending_martin": (not in_martin) and martin_ok,
+                "needs_martin_restart": (not martin_ok),
+            }
+        )
+    return {
+        "tables": tables,
+        "meta": {
+            "martin_ok": martin_ok,
+            "postgis_c_star": len(postgis_ids),
+            "martin_c_star": len(martin_ids),
+            "in_catalog": len(blocked),
+            "available": len(tables),
+            "martin_ghosts": len(ghosts),
+            "sample_blocked": blocked[:15],
+            "sample_ghosts": ghosts[:15],
+        },
+    }
 
 
 def list_table_columns(table: str) -> List[Dict[str, str]]:
@@ -306,9 +398,11 @@ def table_publish_status(table: str) -> Dict[str, Any]:
     name = (table or "").strip()
     if not name:
         raise ValueError("INVALID_TABLE")
+    martin_ok = True
     try:
         martin_ids = {t.lower() for t in fetch_martin_table_ids()}
     except RuntimeError:
+        martin_ok = False
         martin_ids = set()
     in_martin = name.lower() in martin_ids
     in_catalog = name.lower() in catalog_table_names()
@@ -316,8 +410,22 @@ def table_publish_status(table: str) -> Dict[str, Any]:
         "table": name,
         "in_martin": in_martin,
         "in_catalog": in_catalog,
-        "needs_martin_restart": not in_martin,
+        "pending_martin": martin_ok and not in_martin,
+        "needs_martin_restart": not martin_ok,
+        "martin_available": martin_ok,
         "is_denue_table": name.lower() == "c_denue",
+    }
+
+
+def wait_table_in_martin(table: str, timeout_s: Optional[float] = None) -> Dict[str, Any]:
+    """Espera discovery de Martin; alinea flags de estado para el wizard."""
+    result = wait_for_martin_table(table, timeout_s=timeout_s)
+    in_martin = bool(result.get("in_martin"))
+    martin_ok = bool(result.get("martin_available"))
+    return {
+        **result,
+        "pending_martin": martin_ok and not in_martin,
+        "needs_martin_restart": not martin_ok,
     }
 
 
@@ -712,16 +820,34 @@ def update_layer_from_payload(layer_id: str, payload: Dict[str, Any], user_id: i
     return {"layer_id": saved_id, "warnings": warnings, "entry": entry}
 
 
-def delete_managed_layer(layer_id: str, user_id: int) -> Dict[str, Any]:
+def delete_managed_layer(
+    layer_id: str,
+    user_id: int,
+    *,
+    drop_table: bool = False,
+    wait_martin: bool = False,
+) -> Dict[str, Any]:
+    """
+    Despublica la capa del catálogo.
+    Con drop_table=True también elimina la tabla PostGIS.
+    Por defecto no espera a Martin (el mapa deja de listarla solo en ~30 s);
+    así la UI del portal responde al instante. wait_martin=True hace un sondeo corto.
+    """
     lid = slug_layer_id(layer_id)
     if lid not in _editable_studio_layer_ids():
         raise ValueError("LAYER_NOT_MANAGED")
 
     catalog = load_catalog_mutable()
+    layers_map = catalog.get("layers") or {}
+    table_name = ""
+    if isinstance(layers_map, dict):
+        entry_pre = layers_map.get(lid) or layers_map.get(layer_id)
+        if isinstance(entry_pre, dict):
+            table_name = str((entry_pre.get("data") or {}).get("table") or "").strip()
+
     catalog, saved_id, before = delete_layer_entry(catalog, lid)
     save_catalog(catalog)
 
-    record_audit(user_id, "delete_layer", saved_id, before, None)
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -729,7 +855,76 @@ def delete_managed_layer(layer_id: str, user_id: int) -> Dict[str, Any]:
                 (saved_id,),
             )
 
-    return {"layer_id": saved_id, "deleted": True}
+    # Auditoría inmediata (antes de DROP/wait) para listados concurrentes.
+    record_audit(user_id, "delete_layer", saved_id, before, None)
+
+    drop_info: Optional[Dict[str, Any]] = None
+    martin_gone: Optional[Dict[str, Any]] = None
+    if drop_table:
+        from visor_table_drop import drop_postgis_table, wait_for_martin_table_gone
+
+        target = table_name or str((before or {}).get("data", {}).get("table") or "")
+        drop_info = drop_postgis_table(target)
+        if wait_martin:
+            # Sondeo corto: no bloquear la respuesta HTTP del portal.
+            martin_gone = wait_for_martin_table_gone(drop_info["table"], timeout_s=8)
+        record_audit(
+            user_id,
+            "drop_table",
+            saved_id,
+            before,
+            {
+                "table": drop_info.get("table"),
+                "dropped": True,
+                "martin_gone": (martin_gone or {}).get("gone_from_martin"),
+            },
+        )
+
+    return {
+        "layer_id": saved_id,
+        "deleted": True,
+        "table": table_name or (drop_info or {}).get("table"),
+        "drop_table": bool(drop_table),
+        "drop": drop_info,
+        "martin": martin_gone,
+    }
+
+
+def drop_orphan_postgis_table(
+    table: str,
+    user_id: int,
+    *,
+    wait_martin: bool = False,
+) -> Dict[str, Any]:
+    """
+    Elimina una tabla PostGIS que no está (o ya no está) en el catálogo del visor.
+    Útil tras despublicar o para limpiar imports fallidos.
+    """
+    from visor_table_drop import drop_postgis_table, wait_for_martin_table_gone
+
+    name = (table or "").strip().lower()
+    if name in catalog_table_names():
+        raise ValueError(
+            "TABLE_IN_CATALOG:Despublique la capa del catálogo antes de borrar la tabla, "
+            "o use Despublicar y borrar tabla"
+        )
+    drop_info = drop_postgis_table(name)
+    martin_gone = None
+    if wait_martin:
+        martin_gone = wait_for_martin_table_gone(drop_info["table"], timeout_s=8)
+    record_audit(
+        user_id,
+        "drop_table",
+        drop_info["table"],
+        None,
+        {
+            "table": drop_info.get("table"),
+            "dropped": True,
+            "orphan": True,
+            "martin_gone": (martin_gone or {}).get("gone_from_martin"),
+        },
+    )
+    return {"ok": True, "drop": drop_info, "martin": martin_gone}
 
 
 def record_audit(
@@ -761,6 +956,7 @@ AUDIT_ACTION_LABELS: Dict[str, str] = {
     "create_layer": "Publicó capa",
     "update_layer": "Editó capa",
     "delete_layer": "Despublicó capa",
+    "drop_table": "Eliminó tabla PostGIS",
     "create_group": "Creó grupo de capas",
     "update_group": "Renombró grupo de capas",
     "delete_group": "Eliminó grupo de capas",
@@ -776,6 +972,11 @@ AUDIT_ACTION_LABELS: Dict[str, str] = {
 
 def _audit_summary(action: str, layer_id: Optional[str], after_json: Optional[Dict[str, Any]]) -> str:
     after = after_json if isinstance(after_json, dict) else {}
+    if action == "drop_table":
+        table = after.get("table") or layer_id or "—"
+        gone = after.get("martin_gone")
+        suffix = " · mapa actualizado" if gone else " · saldrá del mapa en ~30 s"
+        return f"Tabla {table} eliminada{suffix}"
     if action == "import_shp":
         table = after.get("table") or layer_id or "—"
         n = after.get("feature_count")
